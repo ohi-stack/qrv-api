@@ -1,0 +1,22 @@
+{
+  "name": "qrv-api",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "description": "Public API for the QR-V Global Verification Network",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "qrv",
+    "verification",
+    "api",
+    "registry",
+    "qr"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
