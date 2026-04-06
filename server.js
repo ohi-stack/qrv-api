@@ -1,52 +1,33 @@
-import express from "express";
-
-const app = express();
-app.use(express.json());
-
-/**
- * Health Check
- */
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    service: "qrv-api",
-    status: "running",
-    timestamp: new Date().toISOString()
-  });
-});
-
-/**
- * Verify QR-V Record
- */
 app.get("/verify/:qrvid", async (req, res) => {
   const { qrvid } = req.params;
 
   try {
-    // Placeholder until qrv-node integration
-    const result = {
-      qrvid,
-      verificationState: "NOT_FOUND",
-      status: "unknown",
-      source: "qrv-api",
-      message: "Verification engine not yet connected",
-      timestamp: new Date().toISOString()
-    };
+    // ===== TEMP: mock record (for first activation) =====
+    if (qrvid === "QRV-TEST-001") {
+      return res.json({
+        status: "VERIFIED",
+        qrvid,
+        issuer: "QR-V Test Issuer",
+        record_type: "certificate",
+        verification_state: "active",
+        issued_at: new Date().toISOString(),
+        source: "qrv-api"
+      });
+    }
 
-    res.json(result);
+    // ===== DEFAULT: not found =====
+    return res.status(404).json({
+      status: "NOT_FOUND",
+      qrvid,
+      source: "qrv-api"
+    });
+
   } catch (err) {
     res.status(500).json({
+      status: "ERROR",
       error: "verification_error",
       message: "Failed to verify QR-V identifier",
       details: err.message
     });
   }
-});
-
-/**
- * Server Startup
- */
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`QR-V API running on port ${PORT}`);
 });
