@@ -1,24 +1,30 @@
-# QR-V™ API
+# QR-V™ API — Canonical Backend Node
 
-Canonical programmatic interface for the QR-V™ Global Verification Network.
+`api.qrv.network` is the only production backend application node for the QR-V™ Global Verification Network.
 
-The API enables approved issuers, public verifiers, applications, and enterprise systems to create, retrieve, verify, revoke, and audit registry-backed records through deterministic, versioned REST endpoints.
-
-## Service Boundary
+## Two-Node Architecture
 
 ```text
-Public and issuer clients
+Browser / scanner / issuer
         ↓
-api.qrv.network
+https://qrv.network
         ↓
-registry.qrv.network / PostgreSQL
+https://api.qrv.network/api/v1
         ↓
-canonical records, issuers, hashes, signatures, revocations, audit logs
+PostgreSQL QR-V registry
 ```
 
-The API is the mutation authority. Public interfaces must not write directly to the database.
+All public and authenticated browser experiences live under `qrv.network/<route>`. The API owns registry persistence, issuance, verification, revocation, audit access, and future billing/integration services.
 
-## Canonical Base URL
+## Canonical Public Verification URL
+
+```text
+https://qrv.network/verify/{qrvid}
+```
+
+Previously issued links using `verify.qrv.network` should be preserved through permanent compatibility redirects during migration.
+
+## Canonical API Base
 
 ```text
 https://api.qrv.network/api/v1
@@ -26,167 +32,120 @@ https://api.qrv.network/api/v1
 
 ## Core Endpoints
 
-### System
-
 ```http
-GET /health
-GET /healthz
-GET /readyz
-GET /version
-GET /ping
-```
+GET  /healthz
+GET  /readyz
+GET  /version
+GET  /metrics
 
-### Public verification
+GET  /api/v1/verify/:qrvid
+GET  /api/v1/registry/:qrvid
+GET  /api/v1/registry/hash/:hash
+GET  /api/v1/registry/:qrvid/audit
 
-```http
-GET /verify/:qrvid
-```
-
-### Authenticated issuance
-
-```http
-POST /registry/create
-GET  /issuer/records
-GET  /issuer/records/:qrvid
-GET  /issuer/analytics
-```
-
-### Authenticated lifecycle
-
-```http
-POST /revoke
+POST /api/v1/registry/create
+POST /api/v1/revoke
+POST /api/v1/registry/:qrvid/revoke
 ```
 
 ## Canonical Lifecycle
 
 ```text
 AUTHENTICATE
-→ VALIDATE REQUEST
 → AUTHORIZE ISSUER
-→ GENERATE QRVID
+→ VALIDATE REQUEST
+→ GENERATE QRV-{ENV}-{TYPE}-{SEQUENCE}
 → CANONICALIZE PAYLOAD
 → SHA-256 HASH
 → ED25519 SIGN
-→ PERSIST RECORD
+→ WRITE POSTGRESQL RECORD
 → WRITE AUDIT EVENT
-→ RETURN VERIFICATION URL
+→ RETURN qrv.network/verify/{qrvid}
 ```
 
-Revocation must use the same authorization and audit controls.
-
-## Deterministic Verification Statuses
+## Verification States
 
 ```text
 VERIFIED
 REVOKED
 EXPIRED
 NOT_FOUND
-INVALID_FORMAT
 INVALID_SIGNATURE
-SUSPENDED_ISSUER
-UNAVAILABLE
 ```
 
-The API must never convert dependency failure into `NOT_FOUND` or `VERIFIED`.
+Dependency failure must fail closed as an API error. It must never be represented as `VERIFIED` or `NOT_FOUND`.
 
-## Canonical Demo
+## Database
+
+Run the migration before first deployment or after schema upgrades:
+
+```bash
+npm install
+npm run migrate
+npm run validate:prod
+npm start
+```
+
+The migration owns:
 
 ```text
-QRVID: QRV-PROD-CERT-000001
-Verification URL: https://verify.qrv.network/QRV-PROD-CERT-000001
+qrv_record_seq
+qr_objects
+qr_issuers
+qr_hash_registry
+qr_certificates
+qr_audit_log
+registry_records view
 ```
 
-The demo record must come from the production registry. Static fallback data may be used only in isolated test environments and must be clearly identified.
+## Security
 
-## Authentication
+Production requires:
 
-Protected endpoints require approved authentication such as:
-
-```http
-Authorization: Bearer <jwt>
-x-api-key: <issuer-api-key>
-x-issuer-id: <issuer-id>
-```
-
-Requirements:
-
-- issuer-scoped API keys;
-- role-based authorization;
-- token expiration and revocation;
-- idempotency keys for retryable mutations;
-- strict production CORS allowlist;
-- no secrets in browser-readable configuration.
-
-## Request Validation
-
-Validate:
-
-- QRVID syntax and length;
-- record type enum;
-- issuer authority;
-- required subject fields;
-- issue and expiration timestamps;
-- privacy level;
-- metadata size and allowed structure;
-- lifecycle transition rules;
-- idempotency and uniqueness.
-
-## Audit Events
-
-At minimum:
-
-```text
-registry_create
-registry_verify
-registry_update
-registry_revoke
-issuer_authenticated
-issuer_authorization_failed
-api_key_used
-api_key_revoked
-```
-
-Every audit event should include request ID, actor, issuer, record, operation, result, canonical UTC timestamp, source service, and version.
-
-## Security Requirements
-
-- TLS everywhere.
-- Parameterized SQL.
-- Central validation middleware.
-- Rate limiting by IP, API key, issuer, and route.
-- Safe structured errors without stack traces.
-- SHA-256 and Ed25519 verification.
-- Restricted/private field filtering.
-- Readiness checks for required dependencies.
-- Graceful shutdown and database pool drainage.
-- Secrets supplied through deployment configuration only.
+- `DATABASE_URL` configured only on the API node;
+- TLS-protected PostgreSQL connectivity;
+- `QRV_WRITE_API_KEY` for write endpoints;
+- strict CORS to `https://qrv.network`;
+- rate limiting;
+- parameterized SQL;
+- append-oriented audit events;
+- SHA-256 hashes;
+- Ed25519 signing keys when `REQUIRE_SIGNATURES=true`;
+- secrets stored only in deployment configuration.
 
 ## Environment
 
 ```env
 NODE_ENV=production
 PORT=3000
-APP_VERSION=1.0.0
+APP_VERSION=2.0.0
+QRV_PUBLIC_BASE_URL=https://qrv.network
+QRV_API_BASE_URL=https://api.qrv.network/api/v1
+QRV_ENV_CODE=PROD
 DATABASE_URL=
-JWT_SECRET=
-CORS_ALLOWED_ORIGINS=https://qrv.network,https://verify.qrv.network,https://issuer.qrv.network,https://registry.qrv.network
-QRV_VERIFY_BASE_URL=https://verify.qrv.network
-QRV_REGISTRY_BASE_URL=https://registry.qrv.network
-QRV_PROTOCOL_VERSION=QRVP-1
-QVS_VERSION=QVS-1.0
+DATABASE_SSL=true
+DATABASE_SSL_REJECT_UNAUTHORIZED=true
+QRV_WRITE_API_KEY=
+REQUIRE_SIGNATURES=true
+SIGNING_PRIVATE_KEY=
+SIGNING_PUBLIC_KEY=
+CORS_ALLOWED_ORIGINS=https://qrv.network
+RATE_LIMIT_WINDOW_MS=60000
+RATE_LIMIT_MAX=180
 ```
 
 ## Production Gate
 
-A release is not complete until:
+A release is complete only when:
 
-1. health and readiness pass;
-2. migrations are current;
-3. create, verify, and revoke integration tests pass;
-4. invalid signatures fail closed;
-5. restricted/private data is filtered;
-6. the canonical demo returns a deterministic result;
-7. the issuer lifecycle works without direct database intervention;
-8. audit events exist for create, verify, and revoke.
+1. `/healthz` returns 200;
+2. `/readyz` confirms database and security readiness;
+3. migrations are current;
+4. an authorized create request returns a canonical QRVID;
+5. `/api/v1/verify/{qrvid}` returns `VERIFIED`;
+6. `qrv.network/verify/{qrvid}` renders the same state;
+7. revocation succeeds;
+8. the same public route renders `REVOKED`;
+9. create, verify, and revoke audit events exist.
 
-The published API reference is maintained in `ohi-stack/qrv-docs/openapi.yaml`.
+The consolidation removes `registry.qrv.network`, `verify.qrv.network`, `issuer.qrv.network`, `docs.qrv.network`, `developers.qrv.network`, and similar browser-facing services from the required production deployment topology. Those hostnames may remain temporarily as redirect-only compatibility endpoints.
