@@ -1,114 +1,457 @@
 import express from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
+import morgan from 'morgan';
+import rateLimit from 'express-rate-limit';
+import dotenv from 'dotenv';
+import pkg from 'pg';
+import crypto from 'crypto';
+
+dotenv.config();
+const { Pool } = pkg;
 
 const app = express();
 app.disable('x-powered-by');
+app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
+app.use(morgan('combined'));
 
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = process.env.APP_VERSION || '1.0.0';
-const REGISTRY_BASE_URL = process.env.REGISTRY_BASE_URL || 'https://registry.qrv.network';
-const VERIFY_BASE_URL = process.env.VERIFY_BASE_URL || 'https://verify.qrv.network';
+const VERSION = process.env.APP_VERSION || '2.0.0';
+const SERVICE = 'qrv-api';
+const STARTED_AT = new Date().toISOString();
+const PUBLIC_BASE_URL = process.env.QRV_PUBLIC_BASE_URL || 'https://qrv.network';
+const API_BASE_URL = process.env.QRV_API_BASE_URL || 'https://api.qrv.network/api/v1';
+const ENV_CODE = String(process.env.QRV_ENV_CODE || 'PROD').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'PROD';
+const REQUIRE_SIGNATURES = String(process.env.REQUIRE_SIGNATURES || 'false').toLowerCase() === 'true';
+const WRITE_API_KEY = process.env.QRV_WRITE_API_KEY || process.env.REGISTRY_API_KEY || process.env.ADMIN_API_KEY || '';
+const SIGNING_PRIVATE_KEY = process.env.SIGNING_PRIVATE_KEY || '';
+const SIGNING_PUBLIC_KEY = process.env.SIGNING_PUBLIC_KEY || '';
+
+const allowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS || PUBLIC_BASE_URL)
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Origin not allowed by QR-V CORS policy'));
+  },
+  credentials: true,
+}));
+
+app.use(rateLimit({
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60000),
+  limit: Number(process.env.RATE_LIMIT_MAX || 180),
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+}));
+
+const pool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: String(process.env.DATABASE_SSL || 'true').toLowerCase() === 'true'
+        ? { rejectUnauthorized: String(process.env.DATABASE_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() === 'true' }
+        : false,
+      max: Number(process.env.DATABASE_POOL_MAX || 20),
+    })
+  : null;
+
+function now() {
+  return new Date().toISOString();
+}
 
 function sendError(res, status, code, message, details = undefined) {
   return res.status(status).json({
     ok: false,
-    service: 'qrv-api',
-    error: { code, message, ...(details ? { details } : {}) }
+    service: SERVICE,
+    error: { code, message, ...(details ? { details } : {}) },
+    timestamp: now(),
   });
+}
+
+function requireDatabase(res) {
+  if (pool) return true;
+  sendError(res, 503, 'DATABASE_NOT_CONFIGURED', 'DATABASE_URL is required for this operation');
+  return false;
+}
+
+function requireWriteAuth(req, res, next) {
+  if (!WRITE_API_KEY) return sendError(res, 503, 'WRITE_AUTH_NOT_CONFIGURED', 'QRV_WRITE_API_KEY must be configured');
+  const authorization = String(req.headers.authorization || '');
+  const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+  const apiKey = String(req.headers['x-api-key'] || '');
+  const supplied = apiKey || bearer;
+  if (!supplied || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(WRITE_API_KEY))) {
+    return sendError(res, 401, 'UNAUTHORIZED', 'Valid issuer write credentials are required');
+  }
+  return next();
+}
+
+function normalizeQrvid(value) {
+  try {
+    return decodeURIComponent(String(value || '').trim()).toUpperCase().replace(/\s+/g, '');
+  } catch (_error) {
+    return '';
+  }
+}
+
+const QRVID_FORMAT = /^QRV-[A-Z0-9]+-[A-Z0-9]+-[0-9]{6,}$/;
+
+function normalizeType(value = 'CERT') {
+  const raw = String(value || 'CERT').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const aliases = {
+    CERTIFICATE: 'CERT', CERT: 'CERT',
+    IDENTITY: 'ID', MEMBERSHIP: 'ID', ID: 'ID',
+    PRODUCT: 'PROD', PROD: 'PROD',
+    DOCUMENT: 'DOC', DOC: 'DOC',
+    ASSET: 'ASSET', PROPERTY: 'PROP', PROP: 'PROP',
+    EVENT: 'EVENT', FINANCIAL: 'FIN', FIN: 'FIN',
+  };
+  return aliases[raw] || raw.slice(0, 12) || 'GEN';
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((result, key) => {
+      result[key] = canonicalize(value[key]);
+      return result;
+    }, {});
+  }
+  return value;
+}
+
+function hashPayload(payload) {
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalize(payload))).digest('hex');
+}
+
+function signHash(hash) {
+  if (!SIGNING_PRIVATE_KEY) return null;
+  return crypto.sign(null, Buffer.from(hash, 'utf8'), SIGNING_PRIVATE_KEY).toString('base64');
+}
+
+function verifySignature(hash, signature) {
+  if (!signature) return !REQUIRE_SIGNATURES;
+  if (!SIGNING_PUBLIC_KEY) return !REQUIRE_SIGNATURES;
+  try {
+    return crypto.verify(null, Buffer.from(hash, 'utf8'), SIGNING_PUBLIC_KEY, Buffer.from(signature, 'base64'));
+  } catch (_error) {
+    return false;
+  }
+}
+
+function publicVerifyUrl(qrvid) {
+  return `${PUBLIC_BASE_URL}/verify/${encodeURIComponent(qrvid)}`;
+}
+
+function mapStatus(row) {
+  if (!row) return 'NOT_FOUND';
+  const raw = String(row.status || '').toLowerCase();
+  if (raw === 'revoked') return 'REVOKED';
+  if (raw === 'expired') return 'EXPIRED';
+  if (row.revoked_at) return 'REVOKED';
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) return 'EXPIRED';
+  return 'VERIFIED';
+}
+
+async function audit(qrvid, eventType, metadata = {}) {
+  if (!pool) return;
+  try {
+    await pool.query(
+      'INSERT INTO qr_audit_log (qrvid, event_type, metadata) VALUES ($1,$2,$3)',
+      [qrvid, eventType, metadata]
+    );
+  } catch (error) {
+    console.error('QR-V audit write failed:', error.message);
+  }
+}
+
+async function nextQrvid(recordType) {
+  const type = normalizeType(recordType);
+  const result = await pool.query("SELECT nextval('qrv_record_seq')::bigint AS sequence");
+  const sequence = String(result.rows[0].sequence).padStart(6, '0');
+  return `QRV-${ENV_CODE}-${type}-${sequence}`;
 }
 
 function apiRoot() {
   return {
     ok: true,
-    service: 'qrv-api',
+    service: SERVICE,
     status: 'running',
-    role: 'public-api-gateway',
+    architecture: 'two-node',
+    role: 'canonical-api-registry-backend',
     version: VERSION,
-    registryBaseUrl: REGISTRY_BASE_URL,
-    verifyBaseUrl: VERIFY_BASE_URL,
+    publicBaseUrl: PUBLIC_BASE_URL,
+    apiBaseUrl: API_BASE_URL,
     endpoints: [
-      '/',
-      '/healthz',
-      '/health',
-      '/readyz',
-      '/ready',
-      '/version',
+      '/healthz', '/readyz', '/version', '/metrics',
       '/api/v1/verify/:qrvid',
-      '/verify/:qrvid'
+      '/api/v1/registry/:qrvid',
+      '/api/v1/registry/hash/:hash',
+      '/api/v1/registry/:qrvid/audit',
+      'POST /api/v1/registry/create',
+      'POST /api/v1/revoke',
     ],
-    uiPolicy: 'api.qrv.network returns JSON only. Issuer UI belongs on issuer.qrv.network.'
+    uiPolicy: 'All browser-facing QR-V experiences belong on qrv.network. api.qrv.network returns JSON only.',
   };
 }
 
-async function registryGet(path) {
-  const response = await fetch(`${REGISTRY_BASE_URL}${path}`, {
-    headers: { accept: 'application/json' }
-  });
-  const contentType = response.headers.get('content-type') || '';
-  const body = contentType.includes('application/json')
-    ? await response.json().catch(() => ({}))
-    : { raw: await response.text().catch(() => '') };
-  return { response, body };
-}
-
 app.get('/', (_req, res) => res.json(apiRoot()));
-app.get('/healthz', (_req, res) => res.json({ ok: true, status: 'ok', service: 'qrv-api', version: VERSION }));
-app.get('/health', (_req, res) => res.json({ ok: true, status: 'ok', service: 'qrv-api', version: VERSION }));
-app.get('/version', (_req, res) => res.json({ ok: true, service: 'qrv-api', version: VERSION }));
+app.get('/healthz', (_req, res) => res.json({ ok: true, status: 'ok', service: SERVICE, version: VERSION, architecture: 'two-node', timestamp: now() }));
+app.get('/health', (_req, res) => res.json({ ok: true, status: 'ok', service: SERVICE, version: VERSION, timestamp: now() }));
+app.get('/ping', (_req, res) => res.json({ ok: true, service: SERVICE, pong: true, timestamp: now() }));
+app.get('/version', (_req, res) => res.json({ ok: true, service: SERVICE, version: VERSION, startedAt: STARTED_AT }));
 
 async function readiness(_req, res) {
+  if (!pool) return sendError(res, 503, 'DATABASE_NOT_CONFIGURED', 'DATABASE_URL is required');
+  if (REQUIRE_SIGNATURES && (!SIGNING_PRIVATE_KEY || !SIGNING_PUBLIC_KEY)) {
+    return sendError(res, 503, 'SIGNING_NOT_CONFIGURED', 'Production signature keys are required');
+  }
+  if (!WRITE_API_KEY) return sendError(res, 503, 'WRITE_AUTH_NOT_CONFIGURED', 'QRV_WRITE_API_KEY is required');
   try {
-    const { response, body } = await registryGet('/ready');
-    return res.status(response.ok ? 200 : 503).json({
-      ok: response.ok,
-      ready: response.ok,
-      service: 'qrv-api',
-      registry: body
-    });
-  } catch (err) {
-    return res.status(503).json({
-      ok: false,
-      ready: false,
-      service: 'qrv-api',
-      error: { code: 'REGISTRY_UNAVAILABLE', message: 'Unable to reach registry readiness endpoint' }
-    });
+    await pool.query('SELECT 1');
+    await pool.query("SELECT to_regclass('public.qr_objects') AS qr_objects, to_regclass('public.qr_audit_log') AS qr_audit_log");
+    return res.json({ ok: true, ready: true, service: SERVICE, database: 'connected', signaturesRequired: REQUIRE_SIGNATURES, timestamp: now() });
+  } catch (_error) {
+    return sendError(res, 503, 'DATABASE_UNAVAILABLE', 'Unable to query QR-V PostgreSQL registry');
   }
 }
-
 app.get('/readyz', readiness);
 app.get('/ready', readiness);
 
-app.get('/api/v1/verify/:qrvid', async (req, res) => {
-  const qrvid = String(req.params.qrvid || '').trim();
-  if (!qrvid) return sendError(res, 422, 'INVALID_QRVID', 'QRVID is required');
-
+app.get('/metrics', async (_req, res) => {
+  if (!requireDatabase(res)) return;
   try {
-    const { response, body } = await registryGet(`/verify/${encodeURIComponent(qrvid)}`);
-    return res.status(response.status).json({
-      ...body,
-      source: 'qrv-api',
-      canonicalUrl: `${VERIFY_BASE_URL}/${encodeURIComponent(qrvid)}`
-    });
-  } catch (_err) {
-    return sendError(res, 503, 'REGISTRY_UNAVAILABLE', 'Unable to reach registry');
+    const [records, audits, issuers] = await Promise.all([
+      pool.query('SELECT COUNT(*)::int AS count FROM qr_objects'),
+      pool.query('SELECT COUNT(*)::int AS count FROM qr_audit_log'),
+      pool.query('SELECT COUNT(*)::int AS count FROM qr_issuers'),
+    ]);
+    return res.json({ ok: true, service: SERVICE, records: records.rows[0].count, auditEvents: audits.rows[0].count, issuers: issuers.rows[0].count, timestamp: now() });
+  } catch (_error) {
+    return sendError(res, 500, 'METRICS_FAILED', 'Unable to read registry metrics');
   }
 });
 
-app.get('/verify/:qrvid', (req, res) => {
-  return res.status(308).json({
-    ok: true,
-    service: 'qrv-api',
-    action: 'redirect_to_public_verification_ui',
-    qrvid: req.params.qrvid,
-    canonicalUrl: `${VERIFY_BASE_URL}/${encodeURIComponent(req.params.qrvid)}`
-  });
+app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const body = req.body || {};
+  const recordType = normalizeType(body.recordType || body.type || 'CERT');
+  const issuer = String(body.issuer || body.issuerName || '').trim();
+  const subject = String(body.subject || body.owner || body.recipient || '').trim();
+  const title = String(body.title || body.certificateTitle || '').trim();
+  if (!issuer || !title) return sendError(res, 422, 'INVALID_REQUEST', 'issuer and title are required');
+  if (String(body.visibility || body.privacyLevel || 'public').length > 32) return sendError(res, 422, 'INVALID_VISIBILITY', 'visibility value is too long');
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const qrvid = body.qrvid ? normalizeQrvid(body.qrvid) : await nextQrvid(recordType);
+    if (!QRVID_FORMAT.test(qrvid)) {
+      await client.query('ROLLBACK');
+      return sendError(res, 422, 'INVALID_QRVID', 'QRVID must match QRV-{ENV}-{TYPE}-{SEQUENCE}');
+    }
+
+    const issuedAt = body.issuedAt ? new Date(body.issuedAt) : new Date();
+    if (Number.isNaN(issuedAt.getTime())) {
+      await client.query('ROLLBACK');
+      return sendError(res, 422, 'INVALID_ISSUED_AT', 'issuedAt is invalid');
+    }
+    const expiresAt = body.expiresAt ? new Date(body.expiresAt) : null;
+    if (expiresAt && Number.isNaN(expiresAt.getTime())) {
+      await client.query('ROLLBACK');
+      return sendError(res, 422, 'INVALID_EXPIRES_AT', 'expiresAt is invalid');
+    }
+
+    const payload = {
+      qrvid,
+      recordType,
+      issuer,
+      subject: subject || null,
+      title,
+      description: body.description || null,
+      issuedAt: issuedAt.toISOString(),
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+      visibility: body.visibility || body.privacyLevel || 'public',
+      metadata: body.metadata || {},
+    };
+    const hash = hashPayload(payload);
+    const signature = signHash(hash);
+    if (REQUIRE_SIGNATURES && !signature) {
+      await client.query('ROLLBACK');
+      return sendError(res, 503, 'SIGNING_UNAVAILABLE', 'Record signing is required but the signing key is unavailable');
+    }
+
+    await client.query(
+      `INSERT INTO qr_objects
+       (qrvid, record_type, issuer, owner, title, description, payload, hash, signature, status, visibility, issued_at, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'verified',$10,$11,$12)`,
+      [qrvid, recordType, issuer, subject || null, title, body.description || null, payload, hash, signature, payload.visibility, issuedAt, expiresAt]
+    );
+    await client.query(
+      `INSERT INTO qr_hash_registry (qrvid, hash, algorithm) VALUES ($1,$2,'sha256') ON CONFLICT DO NOTHING`,
+      [qrvid, hash]
+    );
+    if (recordType === 'CERT') {
+      await client.query(
+        `INSERT INTO qr_certificates (qrvid, recipient_name, certificate_title, issuer_name, issue_date, expiration_date, status)
+         VALUES ($1,$2,$3,$4,$5,$6,'verified') ON CONFLICT (qrvid) DO NOTHING`,
+        [qrvid, subject || null, title, issuer, issuedAt, expiresAt]
+      );
+    }
+    await client.query('COMMIT');
+    await audit(qrvid, 'registry_create', { issuer, recordType, requestId: req.headers['x-request-id'] || null });
+    return res.status(201).json({ ok: true, status: 'CREATED', verificationStatus: 'VERIFIED', qrvid, hash, signature: signature ? 'present' : null, verifyUrl: publicVerifyUrl(qrvid), record: payload, timestamp: now() });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (String(error.code) === '23505') return sendError(res, 409, 'QRVID_CONFLICT', 'QRVID already exists');
+    console.error('Create failed:', error);
+    return sendError(res, 500, 'CREATE_FAILED', 'Unable to create QR-V record');
+  } finally {
+    client.release();
+  }
 });
 
-app.use((req, res) => sendError(res, 404, 'NOT_FOUND', `Route not found: ${req.method} ${req.path}`));
+async function getRecord(qrvid) {
+  const result = await pool.query('SELECT * FROM qr_objects WHERE qrvid=$1 LIMIT 1', [qrvid]);
+  return result.rows[0] || null;
+}
 
-app.use((err, _req, res, _next) => {
-  console.error('Unhandled API error:', err);
+app.get('/api/v1/verify/:qrvid', async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const qrvid = normalizeQrvid(req.params.qrvid);
+  if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
+  try {
+    const row = await getRecord(qrvid);
+    if (!row) {
+      await audit(qrvid, 'registry_verify', { result: 'NOT_FOUND' });
+      return res.status(404).json({ ok: false, verified: false, status: 'NOT_FOUND', qrvid, verifyUrl: publicVerifyUrl(qrvid), timestamp: now() });
+    }
+
+    let status = mapStatus(row);
+    let signatureValid = null;
+    let hashValid = null;
+    if (row.payload) {
+      const recalculatedHash = hashPayload(row.payload);
+      hashValid = recalculatedHash === row.hash;
+      if (!hashValid) status = 'INVALID_SIGNATURE';
+      signatureValid = verifySignature(row.hash, row.signature);
+      if (!signatureValid) status = 'INVALID_SIGNATURE';
+    }
+    const verified = status === 'VERIFIED';
+    await audit(qrvid, 'registry_verify', { result: status, verified, requestId: req.headers['x-request-id'] || null });
+
+    return res.status(200).json({
+      ok: verified,
+      verified,
+      status,
+      qrvid,
+      issuer: row.issuer,
+      recordType: row.record_type,
+      subject: row.owner,
+      title: row.title || row.payload?.title || null,
+      issuedAt: row.issued_at || row.created_at,
+      expiresAt: row.expires_at || null,
+      revokedAt: row.revoked_at || null,
+      hash: row.hash,
+      integrity: { hashValid, signatureValid },
+      visibility: row.visibility || 'public',
+      verifyUrl: publicVerifyUrl(qrvid),
+      timestamp: now(),
+    });
+  } catch (error) {
+    console.error('Verify failed:', error);
+    return sendError(res, 500, 'VERIFY_FAILED', 'Unable to verify QR-V record');
+  }
+});
+
+app.get('/api/v1/registry/:qrvid', async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const qrvid = normalizeQrvid(req.params.qrvid);
+  if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
+  try {
+    const row = await getRecord(qrvid);
+    if (!row) return res.status(404).json({ ok: false, status: 'NOT_FOUND', qrvid, timestamp: now() });
+    await audit(qrvid, 'registry_lookup', { requestId: req.headers['x-request-id'] || null });
+    return res.json({ ok: true, status: mapStatus(row), qrvid, record: row, timestamp: now() });
+  } catch (_error) {
+    return sendError(res, 500, 'REGISTRY_LOOKUP_FAILED', 'Unable to retrieve registry record');
+  }
+});
+
+app.get('/api/v1/registry/hash/:hash', async (req, res) => {
+  if (!requireDatabase(res)) return;
+  try {
+    const result = await pool.query('SELECT * FROM qr_objects WHERE hash=$1 ORDER BY created_at DESC LIMIT 25', [req.params.hash]);
+    if (!result.rows.length) return res.status(404).json({ ok: false, status: 'NOT_FOUND', hash: req.params.hash, timestamp: now() });
+    return res.json({ ok: true, status: 'FOUND', records: result.rows, timestamp: now() });
+  } catch (_error) {
+    return sendError(res, 500, 'HASH_LOOKUP_FAILED', 'Unable to query registry hash');
+  }
+});
+
+app.get('/api/v1/registry/:qrvid/audit', requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const qrvid = normalizeQrvid(req.params.qrvid);
+  try {
+    const result = await pool.query('SELECT * FROM qr_audit_log WHERE qrvid=$1 ORDER BY created_at DESC LIMIT 100', [qrvid]);
+    return res.json({ ok: true, qrvid, events: result.rows, timestamp: now() });
+  } catch (_error) {
+    return sendError(res, 500, 'AUDIT_LOOKUP_FAILED', 'Unable to retrieve audit events');
+  }
+});
+
+async function revokeRecord(req, res) {
+  if (!requireDatabase(res)) return;
+  const qrvid = normalizeQrvid(req.body?.qrvid || req.params?.qrvid);
+  if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
+  const reason = String(req.body?.reason || '').trim().slice(0, 500) || null;
+  try {
+    const result = await pool.query(
+      `UPDATE qr_objects
+       SET status='revoked', revoked_at=NOW(), revocation_reason=$2, updated_at=NOW()
+       WHERE qrvid=$1
+       RETURNING *`,
+      [qrvid, reason]
+    );
+    if (!result.rows.length) return res.status(404).json({ ok: false, status: 'NOT_FOUND', qrvid, timestamp: now() });
+    await pool.query(`UPDATE qr_certificates SET status='revoked', updated_at=NOW() WHERE qrvid=$1`, [qrvid]).catch(() => {});
+    await audit(qrvid, 'registry_revoke', { reason, requestId: req.headers['x-request-id'] || null });
+    return res.json({ ok: true, status: 'REVOKED', qrvid, reason, verifyUrl: publicVerifyUrl(qrvid), timestamp: now() });
+  } catch (error) {
+    console.error('Revoke failed:', error);
+    return sendError(res, 500, 'REVOKE_FAILED', 'Unable to revoke QR-V record');
+  }
+}
+
+app.post('/api/v1/revoke', requireWriteAuth, revokeRecord);
+app.post('/api/v1/registry/:qrvid/revoke', requireWriteAuth, revokeRecord);
+
+// Transitional API aliases. These remain JSON-only and may be removed after client migration.
+app.get('/verify/:qrvid', (req, res) => res.redirect(308, `/api/v1/verify/${encodeURIComponent(req.params.qrvid)}`));
+app.get('/registry/:qrvid', (req, res) => res.redirect(308, `/api/v1/registry/${encodeURIComponent(req.params.qrvid)}`));
+app.post('/registry/create', requireWriteAuth, (req, res, next) => {
+  req.url = '/api/v1/registry/create';
+  return app._router.handle(req, res, next);
+});
+app.post('/revoke', requireWriteAuth, revokeRecord);
+
+app.use((req, res) => sendError(res, 404, 'NOT_FOUND', `Route not found: ${req.method} ${req.path}`));
+app.use((error, _req, res, _next) => {
+  console.error('Unhandled API error:', error);
   return sendError(res, 500, 'INTERNAL_ERROR', 'Internal API error');
 });
 
-app.listen(PORT, '0.0.0.0', () => console.log(`qrv-api running on 0.0.0.0:${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`qrv-api v${VERSION} running on 0.0.0.0:${PORT}`));
+
+async function shutdown(signal) {
+  console.log(`Received ${signal}; shutting down ${SERVICE}`);
+  server.close(async () => {
+    if (pool) await pool.end().catch(() => {});
+    process.exit(0);
+  });
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
