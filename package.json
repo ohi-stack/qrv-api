@@ -1,26 +1,27 @@
 {
   "name": "qrv-api",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": false,
   "type": "module",
-  "description": "Public JSON API gateway for the QR-V Global Verification Network",
+  "description": "Canonical JSON API and registry backend for the QR-V Global Verification Network",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js",
+    "check": "node --check server.js && node --check scripts/migrate.js",
     "build": "echo Build complete",
+    "migrate": "node scripts/migrate.js",
     "validate:prod": "npm run check && npm run build"
   },
-  "keywords": [
-    "qrv",
-    "verification",
-    "api",
-    "registry",
-    "qr"
-  ],
+  "keywords": ["qrv", "verification", "api", "registry", "qr"],
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2"
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.0",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0",
+    "pg": "^8.13.1"
   },
   "engines": {
     "node": ">=20"
