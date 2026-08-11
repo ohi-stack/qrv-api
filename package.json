@@ -9,6 +9,7 @@
     "start": "node server.js",
     "check": "node --check server.js && node --check scripts/migrate.js && node --test",
     "test": "node --test",
+    "test:integration": "node scripts/integration-smoke.mjs",
     "build": "echo Build complete",
     "migrate": "node scripts/migrate.js",
     "validate:prod": "npm run check && npm run build"

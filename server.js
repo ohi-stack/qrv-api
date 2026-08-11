@@ -331,6 +331,18 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
       return sendError(res, 503, 'SIGNING_UNAVAILABLE', 'Record signing is required but the signing key is unavailable');
     }
 
+    const issuerResult = await client.query(
+      `INSERT INTO qr_issuers (issuer_id, issuer_name, status)
+       VALUES ($1,$2,'active')
+       ON CONFLICT (issuer_id) DO UPDATE SET issuer_name=EXCLUDED.issuer_name, updated_at=NOW()
+       WHERE qr_issuers.status='active'
+       RETURNING status`,
+      [req.issuerId, issuer]
+    );
+    if (issuerResult.rows[0]?.status !== 'active') {
+      await client.query('ROLLBACK');
+      return sendError(res, 403, 'ISSUER_INACTIVE', 'Issuer is not active');
+    }
     await client.query(
       `INSERT INTO qr_objects
        (qrvid, record_type, issuer_id, issuer, owner, title, description, payload, hash, signature, signature_algorithm, status, visibility, issued_at, expires_at)
