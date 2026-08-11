@@ -12,6 +12,7 @@ const { Pool } = pkg;
 
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', 1);
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('combined'));
@@ -25,6 +26,7 @@ const API_BASE_URL = process.env.QRV_API_BASE_URL || 'https://api.qrv.network/ap
 const ENV_CODE = String(process.env.QRV_ENV_CODE || 'PROD').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'PROD';
 const REQUIRE_SIGNATURES = String(process.env.REQUIRE_SIGNATURES || 'false').toLowerCase() === 'true';
 const WRITE_API_KEY = process.env.QRV_WRITE_API_KEY || process.env.REGISTRY_API_KEY || process.env.ADMIN_API_KEY || '';
+const DEFAULT_ISSUER_ID = String(process.env.QRV_DEFAULT_ISSUER_ID || '').trim();
 const SIGNING_PRIVATE_KEY = process.env.SIGNING_PRIVATE_KEY || '';
 const SIGNING_PUBLIC_KEY = process.env.SIGNING_PUBLIC_KEY || '';
 
@@ -39,6 +41,8 @@ app.use(cors({
     return callback(new Error('Origin not allowed by QR-V CORS policy'));
   },
   credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['content-type', 'authorization', 'x-api-key', 'x-issuer-id', 'x-request-id'],
 }));
 
 app.use(rateLimit({
@@ -55,8 +59,12 @@ const pool = process.env.DATABASE_URL
         ? { rejectUnauthorized: String(process.env.DATABASE_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() === 'true' }
         : false,
       max: Number(process.env.DATABASE_POOL_MAX || 20),
+      connectionTimeoutMillis: Number(process.env.PG_CONNECTION_TIMEOUT_MS || 5000),
+      idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 10000),
     })
   : null;
+
+if (pool) pool.on('error', (error) => console.error('PostgreSQL pool error:', error.message));
 
 function now() {
   return new Date().toISOString();
@@ -77,15 +85,26 @@ function requireDatabase(res) {
   return false;
 }
 
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left || ''));
+  const rightBuffer = Buffer.from(String(right || ''));
+  return leftBuffer.length > 0 && leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
 function requireWriteAuth(req, res, next) {
   if (!WRITE_API_KEY) return sendError(res, 503, 'WRITE_AUTH_NOT_CONFIGURED', 'QRV_WRITE_API_KEY must be configured');
   const authorization = String(req.headers.authorization || '');
   const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
   const apiKey = String(req.headers['x-api-key'] || '');
   const supplied = apiKey || bearer;
-  if (!supplied || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(WRITE_API_KEY))) {
+  if (!safeEqual(supplied, WRITE_API_KEY)) {
     return sendError(res, 401, 'UNAUTHORIZED', 'Valid issuer write credentials are required');
   }
+  const issuerId = String(req.headers['x-issuer-id'] || DEFAULT_ISSUER_ID).trim();
+  if (!issuerId || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{1,119}$/.test(issuerId)) {
+    return sendError(res, 422, 'ISSUER_ID_REQUIRED', 'A valid x-issuer-id is required');
+  }
+  req.issuerId = issuerId;
   return next();
 }
 
@@ -153,19 +172,42 @@ function mapStatus(row) {
   if (raw === 'expired') return 'EXPIRED';
   if (row.revoked_at) return 'REVOKED';
   if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) return 'EXPIRED';
-  return 'VERIFIED';
+  if (['active', 'verified', 'valid'].includes(raw)) return 'VERIFIED';
+  return 'INVALID_STATUS';
 }
 
-async function audit(qrvid, eventType, metadata = {}) {
-  if (!pool) return;
+async function audit(qrvid, eventType, metadata = {}, queryable = pool) {
+  if (!queryable) return;
   try {
-    await pool.query(
-      'INSERT INTO qr_audit_log (qrvid, event_type, metadata) VALUES ($1,$2,$3)',
-      [qrvid, eventType, metadata]
+    await queryable.query(
+      'INSERT INTO qr_audit_log (qrvid, issuer_id, event_type, source_service, result, metadata) VALUES ($1,$2,$3,$4,$5,$6)',
+      [qrvid, metadata.issuerId || null, eventType, SERVICE, metadata.result || null, metadata]
     );
   } catch (error) {
     console.error('QR-V audit write failed:', error.message);
+    throw error;
   }
+}
+
+function isPublicRecord(row) {
+  return String(row?.visibility || 'public').toLowerCase() === 'public';
+}
+
+function publicVerificationRecord(row, status, integrity) {
+  const base = {
+    status,
+    qrvid: row.qrvid,
+    issuer: row.issuer,
+    recordType: row.record_type,
+    issuedAt: row.issued_at || row.created_at,
+    expiresAt: row.expires_at || null,
+    revokedAt: row.revoked_at || null,
+    visibility: row.visibility || 'public',
+    integrity,
+    verifyUrl: publicVerifyUrl(row.qrvid),
+  };
+  if (!isPublicRecord(row)) return base;
+  return { ...base, subject: row.owner, title: row.title || row.payload?.title || null, hash: row.hash };
 }
 
 async function nextQrvid(recordType) {
@@ -210,9 +252,13 @@ async function readiness(_req, res) {
     return sendError(res, 503, 'SIGNING_NOT_CONFIGURED', 'Production signature keys are required');
   }
   if (!WRITE_API_KEY) return sendError(res, 503, 'WRITE_AUTH_NOT_CONFIGURED', 'QRV_WRITE_API_KEY is required');
+  if (!DEFAULT_ISSUER_ID) return sendError(res, 503, 'ISSUER_NOT_CONFIGURED', 'QRV_DEFAULT_ISSUER_ID is required');
   try {
     await pool.query('SELECT 1');
-    await pool.query("SELECT to_regclass('public.qr_objects') AS qr_objects, to_regclass('public.qr_audit_log') AS qr_audit_log");
+    const relations = await pool.query("SELECT to_regclass('public.qr_objects') AS qr_objects, to_regclass('public.qr_audit_log') AS qr_audit_log, to_regclass('public.qr_issuers') AS qr_issuers");
+    if (!relations.rows[0]?.qr_objects || !relations.rows[0]?.qr_audit_log || !relations.rows[0]?.qr_issuers) {
+      return sendError(res, 503, 'MIGRATION_REQUIRED', 'Required QR-V tables are absent');
+    }
     return res.json({ ok: true, ready: true, service: SERVICE, database: 'connected', signaturesRequired: REQUIRE_SIGNATURES, timestamp: now() });
   } catch (_error) {
     return sendError(res, 503, 'DATABASE_UNAVAILABLE', 'Unable to query QR-V PostgreSQL registry');
@@ -221,7 +267,7 @@ async function readiness(_req, res) {
 app.get('/readyz', readiness);
 app.get('/ready', readiness);
 
-app.get('/metrics', async (_req, res) => {
+app.get('/metrics', requireWriteAuth, async (_req, res) => {
   if (!requireDatabase(res)) return;
   try {
     const [records, audits, issuers] = await Promise.all([
@@ -242,8 +288,9 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
   const issuer = String(body.issuer || body.issuerName || '').trim();
   const subject = String(body.subject || body.owner || body.recipient || '').trim();
   const title = String(body.title || body.certificateTitle || '').trim();
+  const visibility = String(body.visibility || body.privacyLevel || 'public').toLowerCase();
   if (!issuer || !title) return sendError(res, 422, 'INVALID_REQUEST', 'issuer and title are required');
-  if (String(body.visibility || body.privacyLevel || 'public').length > 32) return sendError(res, 422, 'INVALID_VISIBILITY', 'visibility value is too long');
+  if (!['public', 'restricted', 'private'].includes(visibility)) return sendError(res, 422, 'INVALID_VISIBILITY', 'visibility must be public, restricted, or private');
 
   const client = await pool.connect();
   try {
@@ -274,7 +321,7 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
       description: body.description || null,
       issuedAt: issuedAt.toISOString(),
       expiresAt: expiresAt ? expiresAt.toISOString() : null,
-      visibility: body.visibility || body.privacyLevel || 'public',
+      visibility,
       metadata: body.metadata || {},
     };
     const hash = hashPayload(payload);
@@ -286,9 +333,9 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
 
     await client.query(
       `INSERT INTO qr_objects
-       (qrvid, record_type, issuer, owner, title, description, payload, hash, signature, status, visibility, issued_at, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'verified',$10,$11,$12)`,
-      [qrvid, recordType, issuer, subject || null, title, body.description || null, payload, hash, signature, payload.visibility, issuedAt, expiresAt]
+       (qrvid, record_type, issuer_id, issuer, owner, title, description, payload, hash, signature, signature_algorithm, status, visibility, issued_at, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ed25519','active',$11,$12,$13)`,
+      [qrvid, recordType, req.issuerId, issuer, subject || null, title, body.description || null, payload, hash, signature, payload.visibility, issuedAt, expiresAt]
     );
     await client.query(
       `INSERT INTO qr_hash_registry (qrvid, hash, algorithm) VALUES ($1,$2,'sha256') ON CONFLICT DO NOTHING`,
@@ -296,13 +343,13 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
     );
     if (recordType === 'CERT') {
       await client.query(
-        `INSERT INTO qr_certificates (qrvid, recipient_name, certificate_title, issuer_name, issue_date, expiration_date, status)
-         VALUES ($1,$2,$3,$4,$5,$6,'verified') ON CONFLICT (qrvid) DO NOTHING`,
-        [qrvid, subject || null, title, issuer, issuedAt, expiresAt]
+        `INSERT INTO qr_certificates (qrvid, issuer_id, recipient_name, certificate_title, issuer_name, issue_date, expiration_date, status, metadata)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8) ON CONFLICT (qrvid) DO NOTHING`,
+        [qrvid, req.issuerId, subject || '', title, issuer, issuedAt, expiresAt, body.metadata || {}]
       );
     }
+    await audit(qrvid, 'registry_create', { issuerId: req.issuerId, issuer, recordType, result: 'CREATED', requestId: req.headers['x-request-id'] || null }, client);
     await client.query('COMMIT');
-    await audit(qrvid, 'registry_create', { issuer, recordType, requestId: req.headers['x-request-id'] || null });
     return res.status(201).json({ ok: true, status: 'CREATED', verificationStatus: 'VERIFIED', qrvid, hash, signature: signature ? 'present' : null, verifyUrl: publicVerifyUrl(qrvid), record: payload, timestamp: now() });
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
@@ -326,7 +373,7 @@ app.get('/api/v1/verify/:qrvid', async (req, res) => {
   try {
     const row = await getRecord(qrvid);
     if (!row) {
-      await audit(qrvid, 'registry_verify', { result: 'NOT_FOUND' });
+      await audit(qrvid, 'registry_verify', { result: 'NOT_FOUND' }).catch(() => {});
       return res.status(404).json({ ok: false, verified: false, status: 'NOT_FOUND', qrvid, verifyUrl: publicVerifyUrl(qrvid), timestamp: now() });
     }
 
@@ -339,26 +386,15 @@ app.get('/api/v1/verify/:qrvid', async (req, res) => {
       if (!hashValid) status = 'INVALID_SIGNATURE';
       signatureValid = verifySignature(row.hash, row.signature);
       if (!signatureValid) status = 'INVALID_SIGNATURE';
-    }
+    } else status = 'INVALID_SIGNATURE';
     const verified = status === 'VERIFIED';
-    await audit(qrvid, 'registry_verify', { result: status, verified, requestId: req.headers['x-request-id'] || null });
+    await audit(qrvid, 'registry_verify', { issuerId: row.issuer_id, result: status, verified, requestId: req.headers['x-request-id'] || null }).catch(() => {});
 
     return res.status(200).json({
       ok: verified,
       verified,
-      status,
-      qrvid,
-      issuer: row.issuer,
-      recordType: row.record_type,
-      subject: row.owner,
-      title: row.title || row.payload?.title || null,
-      issuedAt: row.issued_at || row.created_at,
-      expiresAt: row.expires_at || null,
-      revokedAt: row.revoked_at || null,
-      hash: row.hash,
-      integrity: { hashValid, signatureValid },
-      visibility: row.visibility || 'public',
-      verifyUrl: publicVerifyUrl(qrvid),
+      verificationState: status,
+      ...publicVerificationRecord(row, status, { hashValid, signatureValid }),
       timestamp: now(),
     });
   } catch (error) {
@@ -374,17 +410,18 @@ app.get('/api/v1/registry/:qrvid', async (req, res) => {
   try {
     const row = await getRecord(qrvid);
     if (!row) return res.status(404).json({ ok: false, status: 'NOT_FOUND', qrvid, timestamp: now() });
-    await audit(qrvid, 'registry_lookup', { requestId: req.headers['x-request-id'] || null });
-    return res.json({ ok: true, status: mapStatus(row), qrvid, record: row, timestamp: now() });
+    if (!isPublicRecord(row)) return sendError(res, 403, 'RECORD_RESTRICTED', 'This registry record is not public');
+    await audit(qrvid, 'registry_lookup', { issuerId: row.issuer_id, result: 'FOUND', requestId: req.headers['x-request-id'] || null }).catch(() => {});
+    return res.json({ ok: true, status: mapStatus(row), qrvid, record: publicVerificationRecord(row, mapStatus(row), null), timestamp: now() });
   } catch (_error) {
     return sendError(res, 500, 'REGISTRY_LOOKUP_FAILED', 'Unable to retrieve registry record');
   }
 });
 
-app.get('/api/v1/registry/hash/:hash', async (req, res) => {
+app.get('/api/v1/registry/hash/:hash', requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   try {
-    const result = await pool.query('SELECT * FROM qr_objects WHERE hash=$1 ORDER BY created_at DESC LIMIT 25', [req.params.hash]);
+    const result = await pool.query('SELECT * FROM qr_objects WHERE hash=$1 AND issuer_id=$2 ORDER BY created_at DESC LIMIT 25', [req.params.hash, req.issuerId]);
     if (!result.rows.length) return res.status(404).json({ ok: false, status: 'NOT_FOUND', hash: req.params.hash, timestamp: now() });
     return res.json({ ok: true, status: 'FOUND', records: result.rows, timestamp: now() });
   } catch (_error) {
@@ -396,7 +433,7 @@ app.get('/api/v1/registry/:qrvid/audit', requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   const qrvid = normalizeQrvid(req.params.qrvid);
   try {
-    const result = await pool.query('SELECT * FROM qr_audit_log WHERE qrvid=$1 ORDER BY created_at DESC LIMIT 100', [qrvid]);
+    const result = await pool.query('SELECT * FROM qr_audit_log WHERE qrvid=$1 AND issuer_id=$2 ORDER BY created_at DESC LIMIT 100', [qrvid, req.issuerId]);
     return res.json({ ok: true, qrvid, events: result.rows, timestamp: now() });
   } catch (_error) {
     return sendError(res, 500, 'AUDIT_LOOKUP_FAILED', 'Unable to retrieve audit events');
@@ -408,26 +445,78 @@ async function revokeRecord(req, res) {
   const qrvid = normalizeQrvid(req.body?.qrvid || req.params?.qrvid);
   if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
   const reason = String(req.body?.reason || '').trim().slice(0, 500) || null;
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query('BEGIN');
+    const result = await client.query(
       `UPDATE qr_objects
        SET status='revoked', revoked_at=NOW(), revocation_reason=$2, updated_at=NOW()
-       WHERE qrvid=$1
+       WHERE qrvid=$1 AND issuer_id=$3
        RETURNING *`,
-      [qrvid, reason]
+      [qrvid, reason, req.issuerId]
     );
-    if (!result.rows.length) return res.status(404).json({ ok: false, status: 'NOT_FOUND', qrvid, timestamp: now() });
-    await pool.query(`UPDATE qr_certificates SET status='revoked', updated_at=NOW() WHERE qrvid=$1`, [qrvid]).catch(() => {});
-    await audit(qrvid, 'registry_revoke', { reason, requestId: req.headers['x-request-id'] || null });
+    if (!result.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, status: 'NOT_FOUND', qrvid, timestamp: now() });
+    }
+    await client.query(`UPDATE qr_certificates SET status='revoked', updated_at=NOW() WHERE qrvid=$1 AND issuer_id=$2`, [qrvid, req.issuerId]);
+    await audit(qrvid, 'registry_revoke', { issuerId: req.issuerId, result: 'REVOKED', reason, requestId: req.headers['x-request-id'] || null }, client);
+    await client.query('COMMIT');
     return res.json({ ok: true, status: 'REVOKED', qrvid, reason, verifyUrl: publicVerifyUrl(qrvid), timestamp: now() });
   } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('Revoke failed:', error);
     return sendError(res, 500, 'REVOKE_FAILED', 'Unable to revoke QR-V record');
+  } finally {
+    client.release();
   }
 }
 
 app.post('/api/v1/revoke', requireWriteAuth, revokeRecord);
 app.post('/api/v1/registry/:qrvid/revoke', requireWriteAuth, revokeRecord);
+
+app.get('/api/v1/issuer/records', requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit || 50), 1), 100);
+    const result = await pool.query(
+      'SELECT qrvid, record_type, issuer, owner, title, status, visibility, issued_at, expires_at, revoked_at, created_at FROM qr_objects WHERE issuer_id=$1 ORDER BY created_at DESC LIMIT $2',
+      [req.issuerId, limit]
+    );
+    return res.json({ ok: true, records: result.rows, timestamp: now() });
+  } catch (_error) {
+    return sendError(res, 500, 'ISSUER_RECORDS_FAILED', 'Unable to retrieve issuer records');
+  }
+});
+
+app.get('/api/v1/issuer/records/:qrvid', requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  try {
+    const qrvid = normalizeQrvid(req.params.qrvid);
+    const result = await pool.query('SELECT * FROM qr_objects WHERE qrvid=$1 AND issuer_id=$2 LIMIT 1', [qrvid, req.issuerId]);
+    if (!result.rows.length) return res.status(404).json({ ok: false, status: 'NOT_FOUND', qrvid, timestamp: now() });
+    return res.json({ ok: true, record: result.rows[0], timestamp: now() });
+  } catch (_error) {
+    return sendError(res, 500, 'ISSUER_RECORD_FAILED', 'Unable to retrieve issuer record');
+  }
+});
+
+app.get('/api/v1/issuer/analytics', requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  try {
+    const result = await pool.query(
+      `SELECT COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status IN ('active','verified','valid') AND (expires_at IS NULL OR expires_at > NOW()))::int AS active,
+        COUNT(*) FILTER (WHERE status='revoked' OR revoked_at IS NOT NULL)::int AS revoked,
+        COUNT(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at <= NOW())::int AS expired
+       FROM qr_objects WHERE issuer_id=$1`,
+      [req.issuerId]
+    );
+    return res.json({ ok: true, issuerId: req.issuerId, ...result.rows[0], timestamp: now() });
+  } catch (_error) {
+    return sendError(res, 500, 'ISSUER_ANALYTICS_FAILED', 'Unable to retrieve issuer analytics');
+  }
+});
 
 // Transitional API aliases. These remain JSON-only and may be removed after client migration.
 app.get('/verify/:qrvid', (req, res) => res.redirect(308, `/api/v1/verify/${encodeURIComponent(req.params.qrvid)}`));
@@ -440,14 +529,18 @@ app.post('/revoke', requireWriteAuth, revokeRecord);
 
 app.use((req, res) => sendError(res, 404, 'NOT_FOUND', `Route not found: ${req.method} ${req.path}`));
 app.use((error, _req, res, _next) => {
+  if (error?.message === 'Origin not allowed by QR-V CORS policy') return sendError(res, 403, 'CORS_DENIED', 'Origin is not allowed');
   console.error('Unhandled API error:', error);
   return sendError(res, 500, 'INTERNAL_ERROR', 'Internal API error');
 });
 
-const server = app.listen(PORT, '0.0.0.0', () => console.log(`qrv-api v${VERSION} running on 0.0.0.0:${PORT}`));
+const server = process.env.NODE_ENV === 'test'
+  ? null
+  : app.listen(PORT, '0.0.0.0', () => console.log(`qrv-api v${VERSION} running on 0.0.0.0:${PORT}`));
 
 async function shutdown(signal) {
   console.log(`Received ${signal}; shutting down ${SERVICE}`);
+  if (!server) return;
   server.close(async () => {
     if (pool) await pool.end().catch(() => {});
     process.exit(0);
@@ -455,3 +548,5 @@ async function shutdown(signal) {
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+export { app, mapStatus, publicVerificationRecord, safeEqual };
