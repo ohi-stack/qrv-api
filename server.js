@@ -17,18 +17,32 @@ app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('combined'));
 
+const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = process.env.APP_VERSION || '2.0.0';
 const SERVICE = 'qrv-api';
+const SCHEMA_VERSION = '2026-08-11-api-owned-v3';
+const MIN_WRITE_API_KEY_BYTES = 32;
 const STARTED_AT = new Date().toISOString();
-const PUBLIC_BASE_URL = process.env.QRV_PUBLIC_BASE_URL || 'https://qrv.network';
-const API_BASE_URL = process.env.QRV_API_BASE_URL || 'https://api.qrv.network/api/v1';
+const PUBLIC_BASE_URL = String(process.env.QRV_PUBLIC_BASE_URL || 'https://qrv.network').replace(/\/$/, '');
+const API_BASE_URL = String(process.env.QRV_API_BASE_URL || 'https://api.qrv.network/api/v1').replace(/\/$/, '');
 const ENV_CODE = String(process.env.QRV_ENV_CODE || 'PROD').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'PROD';
-const REQUIRE_SIGNATURES = String(process.env.REQUIRE_SIGNATURES || 'false').toLowerCase() === 'true';
+const REQUIRE_SIGNATURES = String(process.env.REQUIRE_SIGNATURES ?? (NODE_ENV === 'production' ? 'true' : 'false')).toLowerCase() === 'true';
 const WRITE_API_KEY = process.env.QRV_WRITE_API_KEY || process.env.REGISTRY_API_KEY || process.env.ADMIN_API_KEY || '';
 const DEFAULT_ISSUER_ID = String(process.env.QRV_DEFAULT_ISSUER_ID || '').trim();
-const SIGNING_PRIVATE_KEY = process.env.SIGNING_PRIVATE_KEY || '';
-const SIGNING_PUBLIC_KEY = process.env.SIGNING_PUBLIC_KEY || '';
+
+function readSigningKey(raw, encoded) {
+  if (raw) return String(raw).replace(/\\n/g, '\n');
+  if (!encoded) return '';
+  try {
+    return Buffer.from(String(encoded), 'base64').toString('utf8');
+  } catch (_error) {
+    return '';
+  }
+}
+
+const SIGNING_PRIVATE_KEY = readSigningKey(process.env.SIGNING_PRIVATE_KEY, process.env.SIGNING_PRIVATE_KEY_BASE64);
+const SIGNING_PUBLIC_KEY = readSigningKey(process.env.SIGNING_PUBLIC_KEY, process.env.SIGNING_PUBLIC_KEY_BASE64);
 
 const allowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS || PUBLIC_BASE_URL)
   .split(',')
@@ -45,12 +59,12 @@ app.use(cors({
   allowedHeaders: ['content-type', 'authorization', 'x-api-key', 'x-issuer-id', 'x-request-id'],
 }));
 
-app.use(rateLimit({
+const publicRateLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60000),
   limit: Number(process.env.RATE_LIMIT_MAX || 180),
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-}));
+});
 
 const pool = process.env.DATABASE_URL
   ? new Pool({
@@ -161,6 +175,17 @@ function verifySignature(hash, signature) {
   }
 }
 
+function signingKeyPairValid() {
+  if (!SIGNING_PRIVATE_KEY || !SIGNING_PUBLIC_KEY) return false;
+  try {
+    const probe = Buffer.from('qrv-signing-readiness-v1', 'utf8');
+    const signature = crypto.sign(null, probe, SIGNING_PRIVATE_KEY);
+    return crypto.verify(null, probe, SIGNING_PUBLIC_KEY, signature);
+  } catch (_error) {
+    return false;
+  }
+}
+
 function publicVerifyUrl(qrvid) {
   return `${PUBLIC_BASE_URL}/verify/${encodeURIComponent(qrvid)}`;
 }
@@ -171,7 +196,11 @@ function mapStatus(row) {
   if (raw === 'revoked') return 'REVOKED';
   if (raw === 'expired') return 'EXPIRED';
   if (row.revoked_at) return 'REVOKED';
-  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) return 'EXPIRED';
+  if (row.expires_at) {
+    const expiresAt = new Date(row.expires_at).getTime();
+    if (Number.isNaN(expiresAt)) return 'INVALID_STATUS';
+    if (expiresAt <= Date.now()) return 'EXPIRED';
+  }
   if (['active', 'verified', 'valid'].includes(raw)) return 'VERIFIED';
   return 'INVALID_STATUS';
 }
@@ -248,18 +277,32 @@ app.get('/version', (_req, res) => res.json({ ok: true, service: SERVICE, versio
 
 async function readiness(_req, res) {
   if (!pool) return sendError(res, 503, 'DATABASE_NOT_CONFIGURED', 'DATABASE_URL is required');
-  if (REQUIRE_SIGNATURES && (!SIGNING_PRIVATE_KEY || !SIGNING_PUBLIC_KEY)) {
-    return sendError(res, 503, 'SIGNING_NOT_CONFIGURED', 'Production signature keys are required');
+  if (REQUIRE_SIGNATURES && !signingKeyPairValid()) {
+    return sendError(res, 503, 'SIGNING_NOT_READY', 'A valid matching Ed25519 signing key pair is required');
   }
   if (!WRITE_API_KEY) return sendError(res, 503, 'WRITE_AUTH_NOT_CONFIGURED', 'QRV_WRITE_API_KEY is required');
+  if (Buffer.byteLength(WRITE_API_KEY) < MIN_WRITE_API_KEY_BYTES) {
+    return sendError(res, 503, 'WRITE_AUTH_WEAK', `QRV_WRITE_API_KEY must contain at least ${MIN_WRITE_API_KEY_BYTES} bytes`);
+  }
   if (!DEFAULT_ISSUER_ID) return sendError(res, 503, 'ISSUER_NOT_CONFIGURED', 'QRV_DEFAULT_ISSUER_ID is required');
   try {
     await pool.query('SELECT 1');
-    const relations = await pool.query("SELECT to_regclass('public.qr_objects') AS qr_objects, to_regclass('public.qr_audit_log') AS qr_audit_log, to_regclass('public.qr_issuers') AS qr_issuers");
-    if (!relations.rows[0]?.qr_objects || !relations.rows[0]?.qr_audit_log || !relations.rows[0]?.qr_issuers) {
-      return sendError(res, 503, 'MIGRATION_REQUIRED', 'Required QR-V tables are absent');
+    const relations = await pool.query(`SELECT
+      to_regclass('public.qr_objects') AS qr_objects,
+      to_regclass('public.qr_audit_log') AS qr_audit_log,
+      to_regclass('public.qr_issuers') AS qr_issuers,
+      to_regclass('public.qr_hash_registry') AS qr_hash_registry,
+      to_regclass('public.qr_certificates') AS qr_certificates,
+      to_regclass('public.qrv_schema_migrations') AS qrv_schema_migrations,
+      to_regclass('public.qrv_record_seq') AS qrv_record_seq,
+      to_regclass('public.registry_records') AS registry_records`);
+    const requiredRelations = Object.values(relations.rows[0] || {});
+    if (requiredRelations.length !== 8 || requiredRelations.some((relation) => !relation)) {
+      return sendError(res, 503, 'MIGRATION_REQUIRED', 'Required QR-V schema relations are absent');
     }
-    return res.json({ ok: true, ready: true, service: SERVICE, database: 'connected', signaturesRequired: REQUIRE_SIGNATURES, timestamp: now() });
+    const migration = await pool.query('SELECT 1 FROM qrv_schema_migrations WHERE version=$1 LIMIT 1', [SCHEMA_VERSION]);
+    if (!migration.rows.length) return sendError(res, 503, 'MIGRATION_REQUIRED', `Required schema version ${SCHEMA_VERSION} is not applied`);
+    return res.json({ ok: true, ready: true, service: SERVICE, database: 'connected', schemaVersion: SCHEMA_VERSION, signaturesRequired: REQUIRE_SIGNATURES, signingKeyPairValid: REQUIRE_SIGNATURES ? true : null, timestamp: now() });
   } catch (_error) {
     return sendError(res, 503, 'DATABASE_UNAVAILABLE', 'Unable to query QR-V PostgreSQL registry');
   }
@@ -300,6 +343,10 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
       await client.query('ROLLBACK');
       return sendError(res, 422, 'INVALID_QRVID', 'QRVID must match QRV-{ENV}-{TYPE}-{SEQUENCE}');
     }
+    if (!qrvid.startsWith(`QRV-${ENV_CODE}-`)) {
+      await client.query('ROLLBACK');
+      return sendError(res, 422, 'INVALID_QRVID_ENVIRONMENT', `QRVID must use the ${ENV_CODE} environment namespace`);
+    }
 
     const issuedAt = body.issuedAt ? new Date(body.issuedAt) : new Date();
     if (Number.isNaN(issuedAt.getTime())) {
@@ -310,6 +357,10 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
     if (expiresAt && Number.isNaN(expiresAt.getTime())) {
       await client.query('ROLLBACK');
       return sendError(res, 422, 'INVALID_EXPIRES_AT', 'expiresAt is invalid');
+    }
+    if (expiresAt && expiresAt.getTime() <= issuedAt.getTime()) {
+      await client.query('ROLLBACK');
+      return sendError(res, 422, 'INVALID_VALIDITY_PERIOD', 'expiresAt must be later than issuedAt');
     }
 
     const payload = {
@@ -378,7 +429,7 @@ async function getRecord(qrvid) {
   return result.rows[0] || null;
 }
 
-app.get('/api/v1/verify/:qrvid', async (req, res) => {
+app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
   if (!requireDatabase(res)) return;
   const qrvid = normalizeQrvid(req.params.qrvid);
   if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
@@ -415,7 +466,7 @@ app.get('/api/v1/verify/:qrvid', async (req, res) => {
   }
 });
 
-app.get('/api/v1/registry/:qrvid', async (req, res) => {
+app.get('/api/v1/registry/:qrvid', publicRateLimiter, async (req, res) => {
   if (!requireDatabase(res)) return;
   const qrvid = normalizeQrvid(req.params.qrvid);
   if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
@@ -561,4 +612,4 @@ async function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-export { app, mapStatus, publicVerificationRecord, safeEqual };
+export { app, mapStatus, publicVerificationRecord, safeEqual, signingKeyPairValid };

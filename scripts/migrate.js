@@ -3,6 +3,7 @@ import pkg from 'pg';
 
 dotenv.config();
 const { Pool } = pkg;
+const SCHEMA_VERSION = '2026-08-11-api-owned-v3';
 
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is required');
@@ -78,6 +79,25 @@ ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
 ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS revocation_reason TEXT;
 UPDATE qr_objects SET issuer_id='legacy-unassigned' WHERE issuer_id IS NULL;
 UPDATE qr_objects SET visibility='private' WHERE LOWER(COALESCE(visibility,'')) NOT IN ('public','restricted','private');
+UPDATE qr_objects
+SET visibility='private', status='invalid', updated_at=NOW()
+WHERE payload IS NULL AND issuer_id='legacy-unassigned';
+
+DO $$
+DECLARE
+  maximum_sequence BIGINT;
+BEGIN
+  SELECT MAX((regexp_match(qrvid, '([0-9]+)$'))[1]::BIGINT)
+  INTO maximum_sequence
+  FROM qr_objects
+  WHERE qrvid ~ '[0-9]+$';
+
+  IF maximum_sequence IS NULL THEN
+    PERFORM setval('qrv_record_seq', 1, false);
+  ELSE
+    PERFORM setval('qrv_record_seq', maximum_sequence, true);
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS qr_audit_log (
   id BIGSERIAL PRIMARY KEY,
@@ -147,7 +167,7 @@ SELECT qrvid, record_type AS "recordType", issuer_id AS "issuerId", issuer, owne
   created_at AS "createdAt", updated_at AS "updatedAt"
 FROM qr_objects;
 
-INSERT INTO qrv_schema_migrations (version) VALUES ('2026-08-10-api-owned-v2')
+INSERT INTO qrv_schema_migrations (version) VALUES ('${SCHEMA_VERSION}')
 ON CONFLICT (version) DO NOTHING;
 COMMIT;
 `;

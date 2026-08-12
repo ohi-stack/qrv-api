@@ -14,6 +14,7 @@ test('verification status fails closed for unsupported states', () => {
   assert.equal(mapStatus({ status: 'revoked' }), 'REVOKED');
   assert.equal(mapStatus({ status: 'suspended' }), 'INVALID_STATUS');
   assert.equal(mapStatus({ status: 'pending' }), 'INVALID_STATUS');
+  assert.equal(mapStatus({ status: 'active', expires_at: 'not-a-date' }), 'INVALID_STATUS');
 });
 
 test('restricted and private records omit protected fields', () => {

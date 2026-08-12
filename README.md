@@ -129,6 +129,9 @@ QRV_WRITE_API_KEY=
 REQUIRE_SIGNATURES=true
 SIGNING_PRIVATE_KEY=
 SIGNING_PUBLIC_KEY=
+# Base64 alternatives may be used when the deployment panel cannot preserve PEM line breaks.
+SIGNING_PRIVATE_KEY_BASE64=
+SIGNING_PUBLIC_KEY_BASE64=
 CORS_ALLOWED_ORIGINS=https://qrv.network
 RATE_LIMIT_WINDOW_MS=60000
 RATE_LIMIT_MAX=180
@@ -147,5 +150,13 @@ A release is complete only when:
 7. revocation succeeds;
 8. the same public route renders `REVOKED`;
 9. create, verify, and revoke audit events exist.
+
+Run the guarded live gate only after the production hostname, database, and secrets are configured:
+
+```bash
+QRV_ACCEPTANCE_CONFIRM=CREATE_AND_REVOKE_TEST_RECORDS npm run validate:live
+```
+
+The command creates two expressly identified acceptance records and revokes both before completion. See [`docs/PRODUCTION_DEPLOYMENT.md`](docs/PRODUCTION_DEPLOYMENT.md) for the ordered deployment and rollback procedure.
 
 The consolidation removes `registry.qrv.network`, `verify.qrv.network`, `issuer.qrv.network`, `docs.qrv.network`, `developers.qrv.network`, and similar browser-facing services from the required production deployment topology. Those hostnames may remain temporarily as redirect-only compatibility endpoints.
