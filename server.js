@@ -6,6 +6,12 @@ import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import pkg from 'pg';
 import crypto from 'crypto';
+import {
+  ContactCardValidationError,
+  normalizeContactCard,
+  publicContactCard,
+  renderVCard,
+} from './lib/vcard.js';
 
 dotenv.config();
 const { Pool } = pkg;
@@ -19,9 +25,9 @@ app.use(morgan('combined'));
 
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = process.env.APP_VERSION || '2.0.0';
+const VERSION = process.env.APP_VERSION || '2.1.0';
 const SERVICE = 'qrv-api';
-const SCHEMA_VERSION = '2026-08-11-api-owned-v3';
+const SCHEMA_VERSION = '2026-08-14-vcard-v4';
 const MIN_WRITE_API_KEY_BYTES = 32;
 const STARTED_AT = new Date().toISOString();
 const PUBLIC_BASE_URL = String(process.env.QRV_PUBLIC_BASE_URL || 'https://qrv.network').replace(/\/$/, '');
@@ -141,6 +147,7 @@ function normalizeType(value = 'CERT') {
     DOCUMENT: 'DOC', DOC: 'DOC',
     ASSET: 'ASSET', PROPERTY: 'PROP', PROP: 'PROP',
     EVENT: 'EVENT', FINANCIAL: 'FIN', FIN: 'FIN',
+    VCARD: 'VCARD', CONTACT: 'VCARD', CONTACTCARD: 'VCARD',
   };
   return aliases[raw] || raw.slice(0, 12) || 'GEN';
 }
@@ -235,13 +242,22 @@ function publicVerificationRecord(row, status, integrity) {
     integrity,
     verifyUrl: publicVerifyUrl(row.qrvid),
   };
-  if (!isPublicRecord(row)) return base;
-  return { ...base, subject: row.owner, title: row.title || row.payload?.title || null, hash: row.hash };
+  const contact = row.record_type === 'VCARD' && status === 'VERIFIED'
+    ? publicContactCard(row.payload?.contact, String(row.visibility || 'public').toLowerCase())
+    : null;
+  if (!isPublicRecord(row)) return contact ? { ...base, contact, vcardUrl: `${PUBLIC_BASE_URL}/vcard/${encodeURIComponent(row.qrvid)}.vcf` } : base;
+  return {
+    ...base,
+    subject: row.owner,
+    title: row.title || row.payload?.title || null,
+    hash: row.hash,
+    ...(contact ? { contact, vcardUrl: `${PUBLIC_BASE_URL}/vcard/${encodeURIComponent(row.qrvid)}.vcf` } : {}),
+  };
 }
 
-async function nextQrvid(recordType) {
+async function nextQrvid(recordType, queryable = pool) {
   const type = normalizeType(recordType);
-  const result = await pool.query("SELECT nextval('qrv_record_seq')::bigint AS sequence");
+  const result = await queryable.query("SELECT nextval('qrv_record_seq')::bigint AS sequence");
   const sequence = String(result.rows[0].sequence).padStart(6, '0');
   return `QRV-${ENV_CODE}-${type}-${sequence}`;
 }
@@ -262,7 +278,10 @@ function apiRoot() {
       '/api/v1/registry/:qrvid',
       '/api/v1/registry/hash/:hash',
       '/api/v1/registry/:qrvid/audit',
+      '/api/v1/vcards/:qrvid.vcf',
       'POST /api/v1/registry/create',
+      'POST /api/v1/issuer/vcards/:qrvid/update',
+      'POST /api/v1/issuer/vcards/bulk',
       'POST /api/v1/revoke',
     ],
     uiPolicy: 'All browser-facing QR-V experiences belong on qrv.network. api.qrv.network returns JSON only.',
@@ -329,9 +348,22 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
   const body = req.body || {};
   const recordType = normalizeType(body.recordType || body.type || 'CERT');
   const issuer = String(body.issuer || body.issuerName || '').trim();
-  const subject = String(body.subject || body.owner || body.recipient || '').trim();
-  const title = String(body.title || body.certificateTitle || '').trim();
+  let subject = String(body.subject || body.owner || body.recipient || '').trim();
+  let title = String(body.title || body.certificateTitle || '').trim();
   const visibility = String(body.visibility || body.privacyLevel || 'public').toLowerCase();
+  let contact = null;
+  if (recordType === 'VCARD') {
+    try {
+      contact = normalizeContactCard(body.contact || body.metadata?.contact);
+      subject ||= contact.formattedName;
+      title ||= contact.title || `${contact.formattedName} — Verified Contact Card`;
+    } catch (error) {
+      if (error instanceof ContactCardValidationError) {
+        return sendError(res, 422, 'INVALID_CONTACT_CARD', error.message, { field: error.field });
+      }
+      return sendError(res, 500, 'CONTACT_VALIDATION_FAILED', 'Unable to validate contact card');
+    }
+  }
   if (!issuer || !title) return sendError(res, 422, 'INVALID_REQUEST', 'issuer and title are required');
   if (!['public', 'restricted', 'private'].includes(visibility)) return sendError(res, 422, 'INVALID_VISIBILITY', 'visibility must be public, restricted, or private');
 
@@ -374,6 +406,7 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
       expiresAt: expiresAt ? expiresAt.toISOString() : null,
       visibility,
       metadata: body.metadata || {},
+      ...(contact ? { contact } : {}),
     };
     const hash = hashPayload(payload);
     const signature = signHash(hash);
@@ -429,6 +462,21 @@ async function getRecord(qrvid) {
   return result.rows[0] || null;
 }
 
+function evaluateRecord(row) {
+  let status = mapStatus(row);
+  let signatureValid = null;
+  let hashValid = null;
+  if (row?.payload) {
+    const recalculatedHash = hashPayload(row.payload);
+    hashValid = recalculatedHash === row.hash;
+    signatureValid = verifySignature(row.hash, row.signature);
+    if (!hashValid || !signatureValid) status = 'INVALID_SIGNATURE';
+  } else {
+    status = 'INVALID_SIGNATURE';
+  }
+  return { status, hashValid, signatureValid };
+}
+
 app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
   if (!requireDatabase(res)) return;
   const qrvid = normalizeQrvid(req.params.qrvid);
@@ -440,16 +488,7 @@ app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
       return res.status(404).json({ ok: false, verified: false, status: 'NOT_FOUND', qrvid, verifyUrl: publicVerifyUrl(qrvid), timestamp: now() });
     }
 
-    let status = mapStatus(row);
-    let signatureValid = null;
-    let hashValid = null;
-    if (row.payload) {
-      const recalculatedHash = hashPayload(row.payload);
-      hashValid = recalculatedHash === row.hash;
-      if (!hashValid) status = 'INVALID_SIGNATURE';
-      signatureValid = verifySignature(row.hash, row.signature);
-      if (!signatureValid) status = 'INVALID_SIGNATURE';
-    } else status = 'INVALID_SIGNATURE';
+    const { status, hashValid, signatureValid } = evaluateRecord(row);
     const verified = status === 'VERIFIED';
     await audit(qrvid, 'registry_verify', { issuerId: row.issuer_id, result: status, verified, requestId: req.headers['x-request-id'] || null }).catch(() => {});
 
@@ -463,6 +502,264 @@ app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
   } catch (error) {
     console.error('Verify failed:', error);
     return sendError(res, 500, 'VERIFY_FAILED', 'Unable to verify QR-V record');
+  }
+});
+
+app.get('/api/v1/vcards/:qrvid.vcf', publicRateLimiter, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const qrvid = normalizeQrvid(req.params.qrvid);
+  if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
+  try {
+    const row = await getRecord(qrvid);
+    if (!row || row.record_type !== 'VCARD') {
+      return sendError(res, 404, 'VCARD_NOT_FOUND', 'Verified Contact Card was not found');
+    }
+    const { status, hashValid, signatureValid } = evaluateRecord(row);
+    if (status !== 'VERIFIED') {
+      await audit(qrvid, 'vcard_download', { issuerId: row.issuer_id, result: status }).catch(() => {});
+      return sendError(res, status === 'REVOKED' || status === 'EXPIRED' ? 410 : 409, status, 'Verified Contact Card is not active');
+    }
+    const contact = publicContactCard(row.payload?.contact, String(row.visibility || 'public').toLowerCase());
+    if (!contact?.formattedName) return sendError(res, 403, 'VCARD_RESTRICTED', 'No downloadable contact fields are public');
+    const verifyUrl = publicVerifyUrl(qrvid);
+    const output = renderVCard(contact, qrvid, verifyUrl);
+    await audit(qrvid, 'vcard_download', {
+      issuerId: row.issuer_id,
+      result: 'VERIFIED',
+      hashValid,
+      signatureValid,
+      requestId: req.headers['x-request-id'] || null,
+    }).catch(() => {});
+    res.set({
+      'Content-Type': 'text/vcard; charset=utf-8',
+      'Content-Disposition': `attachment; filename="qrv-${qrvid.toLowerCase()}.vcf"`,
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    return res.status(200).send(output);
+  } catch (error) {
+    console.error('vCard download failed:', error);
+    return sendError(res, 500, 'VCARD_DOWNLOAD_FAILED', 'Unable to generate Verified Contact Card');
+  }
+});
+
+app.post('/api/v1/issuer/vcards/:qrvid/update', requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const qrvid = normalizeQrvid(req.params.qrvid);
+  if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
+  let contact;
+  try {
+    contact = normalizeContactCard(req.body?.contact);
+  } catch (error) {
+    if (error instanceof ContactCardValidationError) {
+      return sendError(res, 422, 'INVALID_CONTACT_CARD', error.message, { field: error.field });
+    }
+    return sendError(res, 500, 'CONTACT_VALIDATION_FAILED', 'Unable to validate contact card');
+  }
+  const visibility = String(req.body?.visibility || 'public').toLowerCase();
+  if (!['public', 'restricted', 'private'].includes(visibility)) {
+    return sendError(res, 422, 'INVALID_VISIBILITY', 'visibility must be public, restricted, or private');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      `SELECT * FROM qr_objects WHERE qrvid=$1 AND issuer_id=$2 AND record_type='VCARD' FOR UPDATE`,
+      [qrvid, req.issuerId],
+    );
+    const row = selected.rows[0];
+    if (!row) {
+      await client.query('ROLLBACK');
+      return sendError(res, 404, 'VCARD_NOT_FOUND', 'Verified Contact Card was not found');
+    }
+    if (mapStatus(row) !== 'VERIFIED') {
+      await client.query('ROLLBACK');
+      return sendError(res, 409, 'VCARD_NOT_ACTIVE', 'Only active Verified Contact Cards can be updated');
+    }
+    const title = String(req.body?.title || contact.title || `${contact.formattedName} — Verified Contact Card`).trim().slice(0, 255);
+    const subject = String(req.body?.subject || contact.formattedName).trim().slice(0, 255);
+    const updatedPayload = {
+      ...row.payload,
+      subject,
+      title,
+      description: req.body?.description ?? row.payload?.description ?? null,
+      visibility,
+      contact,
+      updatedAt: now(),
+    };
+    const hash = hashPayload(updatedPayload);
+    const signature = signHash(hash);
+    if (REQUIRE_SIGNATURES && !signature) {
+      await client.query('ROLLBACK');
+      return sendError(res, 503, 'SIGNING_UNAVAILABLE', 'Record signing is required but the signing key is unavailable');
+    }
+    await client.query(
+      `UPDATE qr_objects SET owner=$1, title=$2, description=$3, payload=$4, hash=$5,
+        signature=$6, visibility=$7, updated_at=NOW() WHERE qrvid=$8 AND issuer_id=$9`,
+      [subject, title, updatedPayload.description, updatedPayload, hash, signature, visibility, qrvid, req.issuerId],
+    );
+    await client.query(
+      `INSERT INTO qr_hash_registry (qrvid, hash, algorithm) VALUES ($1,$2,'sha256') ON CONFLICT DO NOTHING`,
+      [qrvid, hash],
+    );
+    await audit(qrvid, 'vcard_update', {
+      issuerId: req.issuerId,
+      result: 'UPDATED',
+      requestId: req.headers['x-request-id'] || null,
+    }, client);
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      status: 'UPDATED',
+      verificationStatus: 'VERIFIED',
+      qrvid,
+      hash,
+      verifyUrl: publicVerifyUrl(qrvid),
+      vcardUrl: `${PUBLIC_BASE_URL}/vcard/${encodeURIComponent(qrvid)}.vcf`,
+      timestamp: now(),
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('vCard update failed:', error);
+    return sendError(res, 500, 'VCARD_UPDATE_FAILED', 'Unable to update Verified Contact Card');
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/v1/issuer/vcards/bulk', requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const issuer = String(req.body?.issuer || req.body?.issuerName || '').trim();
+  const entries = req.body?.cards;
+  if (!issuer) return sendError(res, 422, 'INVALID_REQUEST', 'issuer is required');
+  if (!Array.isArray(entries) || entries.length < 1 || entries.length > 100) {
+    return sendError(res, 422, 'INVALID_BULK_REQUEST', 'cards must contain between 1 and 100 entries');
+  }
+
+  let cards;
+  try {
+    cards = entries.map((entry, index) => {
+      const contact = normalizeContactCard(entry?.contact);
+      const visibility = String(entry?.visibility || 'public').toLowerCase();
+      if (!['public', 'restricted', 'private'].includes(visibility)) {
+        throw new ContactCardValidationError(`cards[${index}].visibility is invalid`, `cards[${index}].visibility`);
+      }
+      const issuedAt = entry?.issuedAt ? new Date(entry.issuedAt) : new Date();
+      const expiresAt = entry?.expiresAt ? new Date(entry.expiresAt) : null;
+      if (Number.isNaN(issuedAt.getTime())) throw new ContactCardValidationError(`cards[${index}].issuedAt is invalid`, `cards[${index}].issuedAt`);
+      if (expiresAt && (Number.isNaN(expiresAt.getTime()) || expiresAt <= issuedAt)) {
+        throw new ContactCardValidationError(`cards[${index}].expiresAt must be later than issuedAt`, `cards[${index}].expiresAt`);
+      }
+      return { entry, contact, visibility, issuedAt, expiresAt };
+    });
+  } catch (error) {
+    if (error instanceof ContactCardValidationError) {
+      return sendError(res, 422, 'INVALID_CONTACT_CARD', error.message, { field: error.field });
+    }
+    return sendError(res, 500, 'CONTACT_VALIDATION_FAILED', 'Unable to validate contact cards');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const issuerResult = await client.query(
+      `INSERT INTO qr_issuers (issuer_id, issuer_name, status)
+       VALUES ($1,$2,'active')
+       ON CONFLICT (issuer_id) DO UPDATE SET issuer_name=EXCLUDED.issuer_name, updated_at=NOW()
+       WHERE qr_issuers.status='active'
+       RETURNING status`,
+      [req.issuerId, issuer],
+    );
+    if (issuerResult.rows[0]?.status !== 'active') {
+      await client.query('ROLLBACK');
+      return sendError(res, 403, 'ISSUER_INACTIVE', 'Issuer is not active');
+    }
+    const created = [];
+    for (const card of cards) {
+      const qrvid = await nextQrvid('VCARD', client);
+      const subject = String(card.entry.subject || card.contact.formattedName).trim().slice(0, 255);
+      const title = String(card.entry.title || card.contact.title || `${card.contact.formattedName} — Verified Contact Card`).trim().slice(0, 255);
+      const payload = {
+        qrvid,
+        recordType: 'VCARD',
+        issuer,
+        subject,
+        title,
+        description: card.entry.description || null,
+        issuedAt: card.issuedAt.toISOString(),
+        expiresAt: card.expiresAt ? card.expiresAt.toISOString() : null,
+        visibility: card.visibility,
+        metadata: card.entry.metadata || {},
+        contact: card.contact,
+      };
+      const hash = hashPayload(payload);
+      const signature = signHash(hash);
+      if (REQUIRE_SIGNATURES && !signature) throw new Error('SIGNING_UNAVAILABLE');
+      await client.query(
+        `INSERT INTO qr_objects
+         (qrvid, record_type, issuer_id, issuer, owner, title, description, payload, hash, signature,
+          signature_algorithm, status, visibility, issued_at, expires_at)
+         VALUES ($1,'VCARD',$2,$3,$4,$5,$6,$7,$8,$9,'ed25519','active',$10,$11,$12)`,
+        [qrvid, req.issuerId, issuer, subject, title, payload.description, payload, hash, signature, card.visibility, card.issuedAt, card.expiresAt],
+      );
+      await client.query(`INSERT INTO qr_hash_registry (qrvid, hash, algorithm) VALUES ($1,$2,'sha256')`, [qrvid, hash]);
+      await audit(qrvid, 'registry_create', {
+        issuerId: req.issuerId,
+        issuer,
+        recordType: 'VCARD',
+        result: 'CREATED',
+        bulk: true,
+        requestId: req.headers['x-request-id'] || null,
+      }, client);
+      created.push({
+        qrvid,
+        hash,
+        verifyUrl: publicVerifyUrl(qrvid),
+        vcardUrl: `${PUBLIC_BASE_URL}/vcard/${encodeURIComponent(qrvid)}.vcf`,
+      });
+    }
+    await client.query('COMMIT');
+    return res.status(201).json({ ok: true, status: 'CREATED', count: created.length, records: created, timestamp: now() });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Bulk vCard create failed:', error);
+    return sendError(res, error.message === 'SIGNING_UNAVAILABLE' ? 503 : 500, error.message === 'SIGNING_UNAVAILABLE' ? 'SIGNING_UNAVAILABLE' : 'BULK_CREATE_FAILED', 'Unable to create Verified Contact Cards');
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/api/v1/issuer/vcards/:qrvid/analytics', requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const qrvid = normalizeQrvid(req.params.qrvid);
+  try {
+    const owned = await pool.query(
+      `SELECT 1 FROM qr_objects WHERE qrvid=$1 AND issuer_id=$2 AND record_type='VCARD' LIMIT 1`,
+      [qrvid, req.issuerId],
+    );
+    if (!owned.rows.length) return sendError(res, 404, 'VCARD_NOT_FOUND', 'Verified Contact Card was not found');
+    const summary = await pool.query(
+      `SELECT
+        COUNT(*) FILTER (WHERE event_type='registry_verify')::int AS scans,
+        COUNT(*) FILTER (WHERE event_type='vcard_download')::int AS downloads,
+        MAX(created_at) FILTER (WHERE event_type IN ('registry_verify','vcard_download')) AS last_interaction_at
+       FROM qr_audit_log WHERE qrvid=$1 AND issuer_id=$2`,
+      [qrvid, req.issuerId],
+    );
+    const daily = await pool.query(
+      `SELECT created_at::date AS day,
+        COUNT(*) FILTER (WHERE event_type='registry_verify')::int AS scans,
+        COUNT(*) FILTER (WHERE event_type='vcard_download')::int AS downloads
+       FROM qr_audit_log
+       WHERE qrvid=$1 AND issuer_id=$2 AND created_at >= NOW() - INTERVAL '30 days'
+       GROUP BY created_at::date ORDER BY day ASC`,
+      [qrvid, req.issuerId],
+    );
+    return res.json({ ok: true, qrvid, ...summary.rows[0], daily: daily.rows, privacy: 'aggregate-only', timestamp: now() });
+  } catch (error) {
+    console.error('vCard analytics failed:', error);
+    return sendError(res, 500, 'VCARD_ANALYTICS_FAILED', 'Unable to retrieve Verified Contact Card analytics');
   }
 });
 

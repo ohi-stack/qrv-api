@@ -44,3 +44,29 @@ test('public records include approved verification fields', () => {
   assert.equal(result.title, 'Public Certificate');
   assert.equal(result.hash, 'hash');
 });
+
+test('restricted contact cards expose only explicitly public contact fields', () => {
+  const row = {
+    qrvid: 'QRV-PROD-VCARD-000001', issuer: 'Example Issuer', record_type: 'VCARD',
+    owner: 'Private Name', title: 'Private Title', hash: 'secret-hash', visibility: 'restricted',
+    payload: {
+      contact: {
+        schema: 'qrv-contact-card/1.0',
+        formattedName: 'Public Name',
+        organization: 'Private Organization',
+        emails: [{ type: 'work', value: 'public@example.com' }],
+        publicFields: ['formattedName', 'emails'],
+      },
+    },
+  };
+  const result = publicVerificationRecord(row, 'VERIFIED', null);
+  assert.equal(result.subject, undefined);
+  assert.equal(result.title, undefined);
+  assert.equal(result.hash, undefined);
+  assert.equal(result.contact.formattedName, 'Public Name');
+  assert.equal(result.contact.organization, undefined);
+  assert.equal(result.contact.emails[0].value, 'public@example.com');
+  const revoked = publicVerificationRecord(row, 'REVOKED', null);
+  assert.equal(revoked.contact, undefined);
+  assert.equal(revoked.vcardUrl, undefined);
+});

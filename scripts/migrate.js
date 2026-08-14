@@ -3,7 +3,7 @@ import pkg from 'pg';
 
 dotenv.config();
 const { Pool } = pkg;
-const SCHEMA_VERSION = '2026-08-11-api-owned-v3';
+const SCHEMA_VERSION = '2026-08-14-vcard-v4';
 
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is required');
@@ -147,9 +147,11 @@ CREATE INDEX IF NOT EXISTS idx_qr_objects_status ON qr_objects(status);
 CREATE INDEX IF NOT EXISTS idx_qr_objects_hash ON qr_objects(hash);
 CREATE INDEX IF NOT EXISTS idx_qr_objects_issuer_id ON qr_objects(issuer_id);
 CREATE INDEX IF NOT EXISTS idx_qr_objects_expires_at ON qr_objects(expires_at);
+CREATE INDEX IF NOT EXISTS idx_qr_objects_record_type ON qr_objects(record_type);
 CREATE INDEX IF NOT EXISTS idx_qr_audit_qrvid ON qr_audit_log(qrvid);
 CREATE INDEX IF NOT EXISTS idx_qr_audit_issuer_id ON qr_audit_log(issuer_id);
 CREATE INDEX IF NOT EXISTS idx_qr_audit_created ON qr_audit_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_qr_audit_record_events ON qr_audit_log(qrvid, event_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qr_hash_registry_hash ON qr_hash_registry(hash);
 CREATE INDEX IF NOT EXISTS idx_qr_certificates_issuer_id ON qr_certificates(issuer_id);
 

@@ -1,9 +1,9 @@
 {
   "name": "qrv-api",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
-  "description": "Canonical JSON API and registry backend for the QR-V Global Verification Network",
+  "description": "Canonical JSON API, registry backend, and verified contact-card data plane for QR-V",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -15,7 +15,7 @@
     "migrate": "node scripts/migrate.js",
     "validate:prod": "npm run check && npm run build"
   },
-  "keywords": ["qrv", "verification", "api", "registry", "qr"],
+  "keywords": ["qrv", "verification", "api", "registry", "qr", "vcard", "contact-card"],
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",

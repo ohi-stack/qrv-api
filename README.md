@@ -48,6 +48,10 @@ POST /api/v1/revoke
 POST /api/v1/registry/:qrvid/revoke
 ```
 
+## Verified Contact Cards
+
+QR-V supports dynamic, signed `VCARD` records with field-level disclosure, one-tap VCF download, aggregate analytics, and transactional bulk issuance. See [`docs/VERIFIED_CONTACT_CARD.md`](docs/VERIFIED_CONTACT_CARD.md).
+
 ## Canonical Lifecycle
 
 ```text
@@ -118,7 +122,7 @@ Production requires:
 ```env
 NODE_ENV=production
 PORT=3000
-APP_VERSION=2.0.0
+APP_VERSION=2.1.0
 QRV_PUBLIC_BASE_URL=https://qrv.network
 QRV_API_BASE_URL=https://api.qrv.network/api/v1
 QRV_ENV_CODE=PROD

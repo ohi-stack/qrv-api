@@ -10,7 +10,7 @@ const base = `http://127.0.0.1:${port}`;
 const apiKey = 'integration-write-key-with-fixed-length';
 const issuerId = 'integration-issuer';
 const otherIssuerId = 'integration-other-issuer';
-const schemaVersion = '2026-08-11-api-owned-v3';
+const schemaVersion = '2026-08-14-vcard-v4';
 const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
 const child = spawn(process.execPath, ['server.js'], {
   stdio: ['ignore', 'inherit', 'inherit'],
@@ -103,6 +103,77 @@ try {
   assert.ok(audit.body.events.some((event) => event.event_type === 'registry_create'));
   assert.ok(audit.body.events.some((event) => event.event_type === 'registry_verify'));
   assert.ok(audit.body.events.some((event) => event.event_type === 'registry_revoke'));
+
+  const contactCard = await json('/api/v1/registry/create', {
+    method: 'POST', headers: authHeaders,
+    body: JSON.stringify({
+      recordType: 'VCARD',
+      issuer: 'Integration Issuer',
+      visibility: 'public',
+      contact: {
+        givenName: 'Ada',
+        familyName: 'Lovelace',
+        organization: 'QR-V Integration',
+        title: 'Verifier',
+        phones: [{ type: 'work', value: '+1 555 0100' }],
+        emails: [{ type: 'work', value: 'ada@example.com' }],
+        website: 'https://qrv.network/',
+      },
+    }),
+  });
+  assert.equal(contactCard.response.status, 201);
+  assert.match(contactCard.body.qrvid, /^QRV-PROD-VCARD-/);
+
+  const verifiedContact = await json(`/api/v1/verify/${encodeURIComponent(contactCard.body.qrvid)}`);
+  assert.equal(verifiedContact.body.verificationState, 'VERIFIED');
+  assert.equal(verifiedContact.body.contact.formattedName, 'Ada Lovelace');
+  assert.match(verifiedContact.body.vcardUrl, /\/vcard\/QRV-PROD-VCARD-/);
+
+  const vcardResponse = await fetch(`${base}/api/v1/vcards/${encodeURIComponent(contactCard.body.qrvid)}.vcf`);
+  const vcardBody = await vcardResponse.text();
+  assert.equal(vcardResponse.status, 200);
+  assert.match(vcardResponse.headers.get('content-type') || '', /text\/vcard/);
+  assert.match(vcardBody, /FN:Ada Lovelace/);
+  assert.match(vcardBody, new RegExp(`X-QRV-ID:${contactCard.body.qrvid}`));
+
+  const updatedContact = await json(`/api/v1/issuer/vcards/${encodeURIComponent(contactCard.body.qrvid)}/update`, {
+    method: 'POST', headers: authHeaders,
+    body: JSON.stringify({
+      visibility: 'restricted',
+      contact: {
+        formattedName: 'Ada Byron',
+        emails: [{ type: 'work', value: 'ada.byron@example.com' }],
+        website: 'https://qrv.network/',
+        publicFields: ['formattedName', 'emails'],
+      },
+    }),
+  });
+  assert.equal(updatedContact.response.status, 200);
+  assert.equal(updatedContact.body.status, 'UPDATED');
+  const verifiedUpdatedContact = await json(`/api/v1/verify/${encodeURIComponent(contactCard.body.qrvid)}`);
+  assert.equal(verifiedUpdatedContact.body.contact.formattedName, 'Ada Byron');
+  assert.equal(verifiedUpdatedContact.body.contact.website, undefined);
+  assert.equal(verifiedUpdatedContact.body.hash, undefined);
+
+  const analytics = await json(`/api/v1/issuer/vcards/${encodeURIComponent(contactCard.body.qrvid)}/analytics`, { headers: authHeaders });
+  assert.equal(analytics.response.status, 200);
+  assert.ok(analytics.body.scans >= 2);
+  assert.ok(analytics.body.downloads >= 1);
+  assert.equal(analytics.body.privacy, 'aggregate-only');
+
+  const bulkContacts = await json('/api/v1/issuer/vcards/bulk', {
+    method: 'POST', headers: authHeaders,
+    body: JSON.stringify({
+      issuer: 'Integration Issuer',
+      cards: [
+        { contact: { formattedName: 'Grace Hopper', emails: [{ value: 'grace@example.com' }] } },
+        { contact: { formattedName: 'Katherine Johnson', website: 'https://qrv.network/' }, visibility: 'private' },
+      ],
+    }),
+  });
+  assert.equal(bulkContacts.response.status, 201);
+  assert.equal(bulkContacts.body.count, 2);
+  assert.equal(bulkContacts.body.records.length, 2);
 
   const privateRecord = await json('/api/v1/registry/create', {
     method: 'POST', headers: authHeaders,

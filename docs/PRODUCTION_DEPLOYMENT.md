@@ -10,7 +10,7 @@ Do not merge or route production traffic until all of the following are true:
 2. PostgreSQL has a verified, restorable backup;
 3. `api.qrv.network` is assigned to this application rather than the issuer interface;
 4. production environment values are installed through the host's secret manager;
-5. migration `2026-08-11-api-owned-v3` is applied;
+5. migration `2026-08-14-vcard-v4` is applied;
 6. `/healthz`, `/readyz`, and the guarded live acceptance command pass.
 
 ## Required runtime
@@ -67,13 +67,13 @@ When the hosting panel cannot preserve multiline PEM values, store base64-encode
 8. Confirm `GET /healthz` returns HTTP 200 JSON from service `qrv-api` without a redirect.
 9. Confirm `GET /readyz` returns HTTP 200 with:
    - `ready: true`;
-   - `schemaVersion: 2026-08-11-api-owned-v3`;
+   - `schemaVersion: 2026-08-14-vcard-v4`;
    - `signingKeyPairValid: true`.
 10. Run the live acceptance gate below.
 
 ## Guarded live acceptance
 
-The gate creates one public and one private record expressly labeled as automated acceptance data, verifies privacy and integrity behavior, revokes both records, and confirms audit events.
+The gate creates one public certificate, one private certificate, and one Verified Contact Card expressly labeled as automated acceptance data. It verifies privacy and integrity behavior, contact update/download/analytics, revokes all records, and confirms audit events.
 
 ```bash
 export QRV_ACCEPTANCE_BASE_URL=https://api.qrv.network

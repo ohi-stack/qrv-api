@@ -6,7 +6,7 @@ const baseUrl = String(process.env.QRV_ACCEPTANCE_BASE_URL || 'https://api.qrv.n
 const apiKey = String(process.env.QRV_WRITE_API_KEY || '');
 const issuerId = String(process.env.QRV_ACCEPTANCE_ISSUER_ID || process.env.QRV_DEFAULT_ISSUER_ID || '');
 const platformOrigin = String(process.env.QRV_PUBLIC_BASE_URL || 'https://qrv.network').replace(/\/$/, '');
-const schemaVersion = '2026-08-11-api-owned-v3';
+const schemaVersion = '2026-08-14-vcard-v4';
 const runId = crypto.randomUUID();
 
 if (confirmation !== 'CREATE_AND_REVOKE_TEST_RECORDS') {
@@ -113,6 +113,64 @@ try {
   const privateRegistry = await request(`/api/v1/registry/${encodeURIComponent(privateCreate.body.qrvid)}`);
   assert.equal(privateRegistry.response.status, 403);
 
+  const contactCreate = await request('/api/v1/registry/create', {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      recordType: 'VCARD',
+      issuer: 'QR-V Production Acceptance',
+      visibility: 'public',
+      contact: {
+        formattedName: 'QR-V Acceptance Contact',
+        organization: 'QR-V Production Acceptance',
+        title: 'Automated system test',
+        emails: [{ type: 'work', value: 'acceptance@example.com' }],
+        website: 'https://qrv.network/',
+      },
+      metadata: { systemTest: true, acceptanceRunId: runId },
+    }),
+  });
+  assert.equal(contactCreate.response.status, 201);
+  assert.match(contactCreate.body?.qrvid || '', /^QRV-PROD-VCARD-[0-9]{6,}$/);
+  createdQrvids.push(contactCreate.body.qrvid);
+
+  const contactVerify = await request(`/api/v1/verify/${encodeURIComponent(contactCreate.body.qrvid)}`);
+  assert.equal(contactVerify.response.status, 200);
+  assert.equal(contactVerify.body?.verificationState, 'VERIFIED');
+  assert.equal(contactVerify.body?.contact?.formattedName, 'QR-V Acceptance Contact');
+
+  const contactDownload = await request(`/api/v1/vcards/${encodeURIComponent(contactCreate.body.qrvid)}.vcf`, {
+    headers: { accept: 'text/vcard' },
+  });
+  assert.equal(contactDownload.response.status, 200);
+  assert.match(contactDownload.response.headers.get('content-type') || '', /text\/vcard/);
+  assert.match(contactDownload.body?.raw || '', /BEGIN:VCARD/);
+
+  const contactUpdate = await request(`/api/v1/issuer/vcards/${encodeURIComponent(contactCreate.body.qrvid)}/update`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({
+      visibility: 'restricted',
+      contact: {
+        formattedName: 'QR-V Acceptance Contact Updated',
+        emails: [{ type: 'work', value: 'acceptance-updated@example.com' }],
+        website: 'https://qrv.network/',
+        publicFields: ['formattedName', 'emails'],
+      },
+    }),
+  });
+  assert.equal(contactUpdate.response.status, 200);
+  assert.equal(contactUpdate.body?.qrvid, contactCreate.body.qrvid);
+
+  const updatedContactVerify = await request(`/api/v1/verify/${encodeURIComponent(contactCreate.body.qrvid)}`);
+  assert.equal(updatedContactVerify.body?.contact?.formattedName, 'QR-V Acceptance Contact Updated');
+  assert.equal(updatedContactVerify.body?.contact?.website, undefined);
+
+  const contactAnalytics = await request(`/api/v1/issuer/vcards/${encodeURIComponent(contactCreate.body.qrvid)}/analytics`, { headers: authHeaders });
+  assert.equal(contactAnalytics.response.status, 200);
+  assert.ok(contactAnalytics.body?.scans >= 2);
+  assert.ok(contactAnalytics.body?.downloads >= 1);
+
   const publicRevoke = await revoke(publicCreate.body.qrvid, `Production acceptance completed: ${runId}`);
   assert.equal(publicRevoke.response.status, 200);
   assert.equal(publicRevoke.body?.status, 'REVOKED');
@@ -130,6 +188,14 @@ try {
   const privateRevoke = await revoke(privateCreate.body.qrvid, `Production acceptance completed: ${runId}`);
   assert.equal(privateRevoke.response.status, 200);
   assert.equal(privateRevoke.body?.status, 'REVOKED');
+
+  const contactRevoke = await revoke(contactCreate.body.qrvid, `Production acceptance completed: ${runId}`);
+  assert.equal(contactRevoke.response.status, 200);
+  assert.equal(contactRevoke.body?.status, 'REVOKED');
+  const contactVerifyAfterRevoke = await request(`/api/v1/verify/${encodeURIComponent(contactCreate.body.qrvid)}`);
+  assert.equal(contactVerifyAfterRevoke.body?.verificationState, 'REVOKED');
+  const contactDownloadAfterRevoke = await request(`/api/v1/vcards/${encodeURIComponent(contactCreate.body.qrvid)}.vcf`);
+  assert.equal(contactDownloadAfterRevoke.response.status, 410);
 
   console.log(JSON.stringify({
     ok: true,
