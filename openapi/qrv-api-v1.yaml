@@ -1,0 +1,448 @@
+openapi: 3.1.0
+info:
+  title: QR-V Global Verification Network API
+  version: 1.0.0
+  description: Canonical QRVP-1 and QVS-1.0 JSON interface for issuance, verification, registry lookup, revocation, issuer operations, and audit evidence.
+  contact:
+    name: QR-V Network Operations
+    url: https://qrv.network/contact
+servers:
+  - url: https://api.qrv.network
+    description: Production
+tags:
+  - name: Operations
+  - name: Verification
+  - name: Registry
+  - name: Issuer
+paths:
+  /healthz:
+    get:
+      tags: [Operations]
+      operationId: getHealth
+      responses:
+        '200':
+          description: Process is responding.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /readyz:
+    get:
+      tags: [Operations]
+      operationId: getReadiness
+      responses:
+        '200':
+          description: Database, schema, signing, write authorization, and issuer configuration are ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /version:
+    get:
+      tags: [Operations]
+      operationId: getVersion
+      responses:
+        '200':
+          description: Running service version.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [service, version]
+                properties:
+                  service: { const: qrv-api }
+                  version: { type: string }
+                  startedAt: { type: string, format: date-time }
+  /api/v1/verify/{qrvid}:
+    get:
+      tags: [Verification]
+      operationId: verifyRecord
+      parameters:
+        - $ref: '#/components/parameters/Qrvid'
+      responses:
+        '200':
+          description: Deterministic verification result. Only VERIFIED is an affirmative claim.
+          headers:
+            X-Request-ID:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationResult'
+        '404':
+          description: QRVID is well formed but absent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundResult'
+        '422':
+          $ref: '#/components/responses/InvalidRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/registry/{qrvid}:
+    get:
+      tags: [Registry]
+      operationId: getPublicRegistryRecord
+      parameters:
+        - $ref: '#/components/parameters/Qrvid'
+      responses:
+        '200':
+          description: Public registry record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistryRecordResponse'
+        '403':
+          description: The record exists but is not public.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Record not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotFoundResult' }
+  /api/v1/registry/create:
+    post:
+      tags: [Issuer]
+      operationId: createRegistryRecord
+      security:
+        - writeApiKey: []
+          issuerId: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecordRequest'
+      responses:
+        '201':
+          description: Record created, hashed, signed, persisted, and audited.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateRecordResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: QRVID conflict.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          $ref: '#/components/responses/InvalidRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/registry/{qrvid}/revoke:
+    post:
+      tags: [Issuer]
+      operationId: revokeRegistryRecord
+      security:
+        - writeApiKey: []
+          issuerId: []
+      parameters:
+        - $ref: '#/components/parameters/Qrvid'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Record revoked transactionally.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, status, qrvid, verifyUrl, timestamp]
+                properties:
+                  ok: { const: true }
+                  status: { const: REVOKED }
+                  qrvid: { $ref: '#/components/schemas/Qrvid' }
+                  reason: { type: [string, 'null'] }
+                  verifyUrl: { type: string, format: uri }
+                  timestamp: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No issuer-scoped record was found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotFoundResult' }
+  /api/v1/registry/{qrvid}/audit:
+    get:
+      tags: [Issuer]
+      operationId: getRecordAudit
+      security:
+        - writeApiKey: []
+          issuerId: []
+      parameters:
+        - $ref: '#/components/parameters/Qrvid'
+      responses:
+        '200':
+          description: Issuer-scoped audit events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, qrvid, events, timestamp]
+                properties:
+                  ok: { const: true }
+                  qrvid: { $ref: '#/components/schemas/Qrvid' }
+                  events:
+                    type: array
+                    maxItems: 100
+                    items: { $ref: '#/components/schemas/AuditEvent' }
+                  timestamp: { type: string, format: date-time }
+  /api/v1/issuer/records:
+    get:
+      tags: [Issuer]
+      operationId: listIssuerRecords
+      security:
+        - writeApiKey: []
+          issuerId: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Issuer-scoped records.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, records, timestamp]
+                properties:
+                  ok: { const: true }
+                  records:
+                    type: array
+                    items: { $ref: '#/components/schemas/RegistryRecord' }
+                  timestamp: { type: string, format: date-time }
+  /api/v1/issuer/analytics:
+    get:
+      tags: [Issuer]
+      operationId: getIssuerAnalytics
+      security:
+        - writeApiKey: []
+          issuerId: []
+      responses:
+        '200':
+          description: Aggregate issuer metrics without scanner-level personal data.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, issuerId, total, active, revoked, expired, timestamp]
+                properties:
+                  ok: { const: true }
+                  issuerId: { type: string }
+                  total: { type: integer, minimum: 0 }
+                  active: { type: integer, minimum: 0 }
+                  revoked: { type: integer, minimum: 0 }
+                  expired: { type: integer, minimum: 0 }
+                  timestamp: { type: string, format: date-time }
+components:
+  securitySchemes:
+    writeApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Server-side credential. Never expose it to browser JavaScript.
+    issuerId:
+      type: apiKey
+      in: header
+      name: X-Issuer-ID
+      description: Issuer scope bound to the configured production credential.
+  parameters:
+    Qrvid:
+      name: qrvid
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Qrvid' }
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9_.:-]+$' }
+  schemas:
+    Qrvid:
+      type: string
+      pattern: '^QRV-[A-Z0-9]+-[A-Z0-9]+-[0-9]{6,}$'
+      examples: [QRV-PROD-CERT-000001]
+    VerificationState:
+      type: string
+      enum: [VERIFIED, REVOKED, EXPIRED, NOT_FOUND, INVALID_SIGNATURE, INVALID_STATUS, UNAVAILABLE]
+    Health:
+      type: object
+      required: [ok, status, service, version, timestamp]
+      properties:
+        ok: { const: true }
+        status: { const: ok }
+        service: { const: qrv-api }
+        version: { type: string }
+        architecture: { const: two-node }
+        timestamp: { type: string, format: date-time }
+    Readiness:
+      type: object
+      required: [ok, ready, service, database, schemaVersion, timestamp]
+      properties:
+        ok: { const: true }
+        ready: { const: true }
+        service: { const: qrv-api }
+        database: { const: connected }
+        schemaVersion: { type: string }
+        signaturesRequired: { type: boolean }
+        signingKeyPairValid: { type: [boolean, 'null'] }
+        timestamp: { type: string, format: date-time }
+    Integrity:
+      type: object
+      required: [hashValid, signatureValid]
+      properties:
+        hashValid: { type: boolean }
+        signatureValid: { type: boolean }
+    VerificationResult:
+      type: object
+      required: [ok, verified, verificationState, status, qrvid, issuer, recordType, integrity, verifyUrl, timestamp]
+      properties:
+        ok: { type: boolean }
+        verified: { type: boolean }
+        verificationState: { $ref: '#/components/schemas/VerificationState' }
+        status: { $ref: '#/components/schemas/VerificationState' }
+        qrvid: { $ref: '#/components/schemas/Qrvid' }
+        issuer: { type: string }
+        recordType: { type: string }
+        issuedAt: { type: [string, 'null'], format: date-time }
+        expiresAt: { type: [string, 'null'], format: date-time }
+        revokedAt: { type: [string, 'null'], format: date-time }
+        visibility: { enum: [public, restricted, private] }
+        integrity: { $ref: '#/components/schemas/Integrity' }
+        subject: { type: string }
+        title: { type: string }
+        hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        verifyUrl: { type: string, format: uri }
+        timestamp: { type: string, format: date-time }
+    NotFoundResult:
+      type: object
+      required: [ok, verified, status, qrvid, timestamp]
+      properties:
+        ok: { const: false }
+        verified: { const: false }
+        status: { const: NOT_FOUND }
+        qrvid: { $ref: '#/components/schemas/Qrvid' }
+        verifyUrl: { type: string, format: uri }
+        timestamp: { type: string, format: date-time }
+    CreateRecordRequest:
+      type: object
+      additionalProperties: false
+      required: [recordType, issuer, title]
+      properties:
+        qrvid: { $ref: '#/components/schemas/Qrvid' }
+        recordType:
+          type: string
+          enum: [CERT, CERTIFICATE, ID, IDENTITY, MEMBERSHIP, PROD, PRODUCT, DOC, DOCUMENT, ASSET, PROP, PROPERTY, EVENT, FIN, FINANCIAL, VCARD]
+        issuer: { type: string, minLength: 1, maxLength: 255 }
+        subject: { type: string, maxLength: 255 }
+        title: { type: string, minLength: 1, maxLength: 255 }
+        description: { type: string, maxLength: 5000 }
+        issuedAt: { type: string, format: date-time }
+        expiresAt: { type: [string, 'null'], format: date-time }
+        visibility: { enum: [public, restricted, private], default: public }
+        metadata: { type: object }
+        contact: { type: object }
+    CreateRecordResponse:
+      type: object
+      required: [ok, status, verificationStatus, qrvid, hash, verifyUrl, record, timestamp]
+      properties:
+        ok: { const: true }
+        status: { const: CREATED }
+        verificationStatus: { const: VERIFIED }
+        qrvid: { $ref: '#/components/schemas/Qrvid' }
+        hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        signature: { enum: [present, null] }
+        verifyUrl: { type: string, format: uri }
+        record: { type: object }
+        timestamp: { type: string, format: date-time }
+    RegistryRecord:
+      type: object
+      required: [qrvid, record_type, issuer, status, visibility]
+      properties:
+        qrvid: { $ref: '#/components/schemas/Qrvid' }
+        record_type: { type: string }
+        issuer: { type: string }
+        owner: { type: [string, 'null'] }
+        title: { type: [string, 'null'] }
+        status: { type: string }
+        visibility: { enum: [public, restricted, private] }
+    RegistryRecordResponse:
+      type: object
+      required: [ok, status, record, timestamp]
+      properties:
+        ok: { const: true }
+        status: { type: string }
+        record: { $ref: '#/components/schemas/RegistryRecord' }
+        timestamp: { type: string, format: date-time }
+    AuditEvent:
+      type: object
+      required: [id, event_type, source_service, created_at]
+      properties:
+        id: { type: integer }
+        qrvid: { type: [string, 'null'] }
+        issuer_id: { type: [string, 'null'] }
+        event_type: { type: string }
+        source_service: { type: string }
+        result: { type: [string, 'null'] }
+        metadata: { type: object }
+        created_at: { type: string, format: date-time }
+    ErrorResponse:
+      type: object
+      required: [ok, service, error, timestamp]
+      properties:
+        ok: { const: false }
+        service: { const: qrv-api }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object }
+        timestamp: { type: string, format: date-time }
+  responses:
+    InvalidRequest:
+      description: Input failed canonical validation.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Write credential is absent or invalid.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Authenticated credential is outside the requested issuer scope.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: Request rate exceeded the applicable public or issuer limit.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unavailable:
+      description: A required dependency or production control is unavailable; no verification claim is made.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }

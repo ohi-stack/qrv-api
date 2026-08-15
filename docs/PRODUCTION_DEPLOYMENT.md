@@ -10,7 +10,7 @@ Do not merge or route production traffic until all of the following are true:
 2. PostgreSQL has a verified, restorable backup;
 3. `api.qrv.network` is assigned to this application rather than the issuer interface;
 4. production environment values are installed through the host's secret manager;
-5. migration `2026-08-14-vcard-v4` is applied;
+5. migration `2026-08-15-production-v5` is applied;
 6. `/healthz`, `/readyz`, and the guarded live acceptance command pass.
 
 ## Required runtime
@@ -32,7 +32,7 @@ Install these values in the production host. Never commit their values.
 
 ```env
 NODE_ENV=production
-APP_VERSION=2.0.0
+APP_VERSION=2.1.0
 QRV_PUBLIC_BASE_URL=https://qrv.network
 QRV_API_BASE_URL=https://api.qrv.network/api/v1
 QRV_ENV_CODE=PROD
@@ -51,6 +51,8 @@ SIGNING_PUBLIC_KEY=<matching Ed25519 public key PEM>
 CORS_ALLOWED_ORIGINS=https://qrv.network
 RATE_LIMIT_WINDOW_MS=60000
 RATE_LIMIT_MAX=180
+ISSUER_RATE_LIMIT_WINDOW_MS=60000
+ISSUER_RATE_LIMIT_MAX=60
 ```
 
 When the hosting panel cannot preserve multiline PEM values, store base64-encoded PEM in `SIGNING_PRIVATE_KEY_BASE64` and `SIGNING_PUBLIC_KEY_BASE64` instead. Do not configure both forms.
@@ -67,7 +69,7 @@ When the hosting panel cannot preserve multiline PEM values, store base64-encode
 8. Confirm `GET /healthz` returns HTTP 200 JSON from service `qrv-api` without a redirect.
 9. Confirm `GET /readyz` returns HTTP 200 with:
    - `ready: true`;
-   - `schemaVersion: 2026-08-14-vcard-v4`;
+   - `schemaVersion: 2026-08-15-production-v5`;
    - `signingKeyPairValid: true`.
 10. Run the live acceptance gate below.
 

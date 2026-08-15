@@ -42,6 +42,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run validate:prod
+      - run: docker build --tag qrv-api:ci .
       - run: npm run migrate
       - run: npm run test:integration
       - run: npm audit --omit=dev --audit-level=high

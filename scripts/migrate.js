@@ -3,7 +3,7 @@ import pkg from 'pg';
 
 dotenv.config();
 const { Pool } = pkg;
-const SCHEMA_VERSION = '2026-08-14-vcard-v4';
+const SCHEMA_VERSION = '2026-08-15-production-v5';
 
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is required');

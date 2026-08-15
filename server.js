@@ -27,7 +27,7 @@ const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = process.env.APP_VERSION || '2.1.0';
 const SERVICE = 'qrv-api';
-const SCHEMA_VERSION = '2026-08-14-vcard-v4';
+const SCHEMA_VERSION = '2026-08-15-production-v5';
 const MIN_WRITE_API_KEY_BYTES = 32;
 const STARTED_AT = new Date().toISOString();
 const PUBLIC_BASE_URL = String(process.env.QRV_PUBLIC_BASE_URL || 'https://qrv.network').replace(/\/$/, '');
@@ -65,9 +65,23 @@ app.use(cors({
   allowedHeaders: ['content-type', 'authorization', 'x-api-key', 'x-issuer-id', 'x-request-id'],
 }));
 
+app.use((req, res, next) => {
+  const supplied = String(req.headers['x-request-id'] || '').trim();
+  req.requestId = /^[A-Za-z0-9_.:-]{8,128}$/.test(supplied) ? supplied : crypto.randomUUID();
+  res.setHeader('X-Request-ID', req.requestId);
+  next();
+});
+
 const publicRateLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60000),
   limit: Number(process.env.RATE_LIMIT_MAX || 180),
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+});
+
+const issuerMutationRateLimiter = rateLimit({
+  windowMs: Number(process.env.ISSUER_RATE_LIMIT_WINDOW_MS || 60000),
+  limit: Number(process.env.ISSUER_RATE_LIMIT_MAX || 60),
   standardHeaders: 'draft-7',
   legacyHeaders: false,
 });
@@ -124,8 +138,18 @@ function requireWriteAuth(req, res, next) {
   if (!issuerId || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{1,119}$/.test(issuerId)) {
     return sendError(res, 422, 'ISSUER_ID_REQUIRED', 'A valid x-issuer-id is required');
   }
+  if (DEFAULT_ISSUER_ID && issuerId !== DEFAULT_ISSUER_ID) {
+    return sendError(res, 403, 'ISSUER_SCOPE_DENIED', 'The configured platform credential cannot assume another issuer identity');
+  }
   req.issuerId = issuerId;
   return next();
+}
+
+function validatedText(value, field, maxLength, { required = false } = {}) {
+  const text = String(value ?? '').trim();
+  if (required && !text) return { error: `${field} is required` };
+  if (text.length > maxLength) return { error: `${field} must not exceed ${maxLength} characters` };
+  return { value: text };
 }
 
 function normalizeQrvid(value) {
@@ -343,13 +367,23 @@ app.get('/metrics', requireWriteAuth, async (_req, res) => {
   }
 });
 
-app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
+app.post('/api/v1/registry/create', requireWriteAuth, issuerMutationRateLimiter, async (req, res) => {
   if (!requireDatabase(res)) return;
   const body = req.body || {};
   const recordType = normalizeType(body.recordType || body.type || 'CERT');
-  const issuer = String(body.issuer || body.issuerName || '').trim();
-  let subject = String(body.subject || body.owner || body.recipient || '').trim();
-  let title = String(body.title || body.certificateTitle || '').trim();
+  const issuerInput = validatedText(body.issuer || body.issuerName, 'issuer', 255, { required: true });
+  const subjectInput = validatedText(body.subject || body.owner || body.recipient, 'subject', 255);
+  const titleInput = validatedText(body.title || body.certificateTitle, 'title', 255);
+  const descriptionInput = validatedText(body.description, 'description', 5000);
+  const inputError = issuerInput.error || subjectInput.error || titleInput.error || descriptionInput.error;
+  if (inputError) return sendError(res, 422, 'INVALID_REQUEST', inputError);
+  const metadata = body.metadata ?? {};
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || JSON.stringify(metadata).length > 65536) {
+    return sendError(res, 422, 'INVALID_METADATA', 'metadata must be an object no larger than 64 KiB');
+  }
+  const issuer = issuerInput.value;
+  let subject = subjectInput.value;
+  let title = titleInput.value;
   const visibility = String(body.visibility || body.privacyLevel || 'public').toLowerCase();
   let contact = null;
   if (recordType === 'VCARD') {
@@ -364,7 +398,7 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
       return sendError(res, 500, 'CONTACT_VALIDATION_FAILED', 'Unable to validate contact card');
     }
   }
-  if (!issuer || !title) return sendError(res, 422, 'INVALID_REQUEST', 'issuer and title are required');
+  if (!title) return sendError(res, 422, 'INVALID_REQUEST', 'title is required');
   if (!['public', 'restricted', 'private'].includes(visibility)) return sendError(res, 422, 'INVALID_VISIBILITY', 'visibility must be public, restricted, or private');
 
   const client = await pool.connect();
@@ -401,11 +435,11 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
       issuer,
       subject: subject || null,
       title,
-      description: body.description || null,
+      description: descriptionInput.value || null,
       issuedAt: issuedAt.toISOString(),
       expiresAt: expiresAt ? expiresAt.toISOString() : null,
       visibility,
-      metadata: body.metadata || {},
+      metadata,
       ...(contact ? { contact } : {}),
     };
     const hash = hashPayload(payload);
@@ -431,7 +465,7 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
       `INSERT INTO qr_objects
        (qrvid, record_type, issuer_id, issuer, owner, title, description, payload, hash, signature, signature_algorithm, status, visibility, issued_at, expires_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ed25519','active',$11,$12,$13)`,
-      [qrvid, recordType, req.issuerId, issuer, subject || null, title, body.description || null, payload, hash, signature, payload.visibility, issuedAt, expiresAt]
+      [qrvid, recordType, req.issuerId, issuer, subject || null, title, descriptionInput.value || null, payload, hash, signature, payload.visibility, issuedAt, expiresAt]
     );
     await client.query(
       `INSERT INTO qr_hash_registry (qrvid, hash, algorithm) VALUES ($1,$2,'sha256') ON CONFLICT DO NOTHING`,
@@ -441,10 +475,10 @@ app.post('/api/v1/registry/create', requireWriteAuth, async (req, res) => {
       await client.query(
         `INSERT INTO qr_certificates (qrvid, issuer_id, recipient_name, certificate_title, issuer_name, issue_date, expiration_date, status, metadata)
          VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8) ON CONFLICT (qrvid) DO NOTHING`,
-        [qrvid, req.issuerId, subject || '', title, issuer, issuedAt, expiresAt, body.metadata || {}]
+        [qrvid, req.issuerId, subject || '', title, issuer, issuedAt, expiresAt, metadata]
       );
     }
-    await audit(qrvid, 'registry_create', { issuerId: req.issuerId, issuer, recordType, result: 'CREATED', requestId: req.headers['x-request-id'] || null }, client);
+    await audit(qrvid, 'registry_create', { issuerId: req.issuerId, issuer, recordType, result: 'CREATED', requestId: req.requestId }, client);
     await client.query('COMMIT');
     return res.status(201).json({ ok: true, status: 'CREATED', verificationStatus: 'VERIFIED', qrvid, hash, signature: signature ? 'present' : null, verifyUrl: publicVerifyUrl(qrvid), record: payload, timestamp: now() });
   } catch (error) {
@@ -481,6 +515,7 @@ app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
   if (!requireDatabase(res)) return;
   const qrvid = normalizeQrvid(req.params.qrvid);
   if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
+  res.setHeader('Cache-Control', 'no-store');
   try {
     const row = await getRecord(qrvid);
     if (!row) {
@@ -490,7 +525,7 @@ app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
 
     const { status, hashValid, signatureValid } = evaluateRecord(row);
     const verified = status === 'VERIFIED';
-    await audit(qrvid, 'registry_verify', { issuerId: row.issuer_id, result: status, verified, requestId: req.headers['x-request-id'] || null }).catch(() => {});
+    await audit(qrvid, 'registry_verify', { issuerId: row.issuer_id, result: status, verified, requestId: req.requestId }).catch(() => {});
 
     return res.status(200).json({
       ok: verified,
@@ -501,7 +536,7 @@ app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
     });
   } catch (error) {
     console.error('Verify failed:', error);
-    return sendError(res, 500, 'VERIFY_FAILED', 'Unable to verify QR-V record');
+    return sendError(res, 503, 'UNAVAILABLE', 'The QR-V registry is temporarily unavailable');
   }
 });
 
@@ -543,7 +578,7 @@ app.get('/api/v1/vcards/:qrvid.vcf', publicRateLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/v1/issuer/vcards/:qrvid/update', requireWriteAuth, async (req, res) => {
+app.post('/api/v1/issuer/vcards/:qrvid/update', requireWriteAuth, issuerMutationRateLimiter, async (req, res) => {
   if (!requireDatabase(res)) return;
   const qrvid = normalizeQrvid(req.params.qrvid);
   if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
@@ -606,7 +641,7 @@ app.post('/api/v1/issuer/vcards/:qrvid/update', requireWriteAuth, async (req, re
     await audit(qrvid, 'vcard_update', {
       issuerId: req.issuerId,
       result: 'UPDATED',
-      requestId: req.headers['x-request-id'] || null,
+      requestId: req.requestId,
     }, client);
     await client.query('COMMIT');
     return res.json({
@@ -628,7 +663,7 @@ app.post('/api/v1/issuer/vcards/:qrvid/update', requireWriteAuth, async (req, re
   }
 });
 
-app.post('/api/v1/issuer/vcards/bulk', requireWriteAuth, async (req, res) => {
+app.post('/api/v1/issuer/vcards/bulk', requireWriteAuth, issuerMutationRateLimiter, async (req, res) => {
   if (!requireDatabase(res)) return;
   const issuer = String(req.body?.issuer || req.body?.issuerName || '').trim();
   const entries = req.body?.cards;
@@ -710,7 +745,7 @@ app.post('/api/v1/issuer/vcards/bulk', requireWriteAuth, async (req, res) => {
         recordType: 'VCARD',
         result: 'CREATED',
         bulk: true,
-        requestId: req.headers['x-request-id'] || null,
+        requestId: req.requestId,
       }, client);
       created.push({
         qrvid,
@@ -820,7 +855,7 @@ async function revokeRecord(req, res) {
       return res.status(404).json({ ok: false, status: 'NOT_FOUND', qrvid, timestamp: now() });
     }
     await client.query(`UPDATE qr_certificates SET status='revoked', updated_at=NOW() WHERE qrvid=$1 AND issuer_id=$2`, [qrvid, req.issuerId]);
-    await audit(qrvid, 'registry_revoke', { issuerId: req.issuerId, result: 'REVOKED', reason, requestId: req.headers['x-request-id'] || null }, client);
+    await audit(qrvid, 'registry_revoke', { issuerId: req.issuerId, result: 'REVOKED', reason, requestId: req.requestId }, client);
     await client.query('COMMIT');
     return res.json({ ok: true, status: 'REVOKED', qrvid, reason, verifyUrl: publicVerifyUrl(qrvid), timestamp: now() });
   } catch (error) {
@@ -832,8 +867,8 @@ async function revokeRecord(req, res) {
   }
 }
 
-app.post('/api/v1/revoke', requireWriteAuth, revokeRecord);
-app.post('/api/v1/registry/:qrvid/revoke', requireWriteAuth, revokeRecord);
+app.post('/api/v1/revoke', requireWriteAuth, issuerMutationRateLimiter, revokeRecord);
+app.post('/api/v1/registry/:qrvid/revoke', requireWriteAuth, issuerMutationRateLimiter, revokeRecord);
 
 app.get('/api/v1/issuer/records', requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;

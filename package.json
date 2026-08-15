@@ -7,10 +7,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check scripts/migrate.js && node --check scripts/integration-smoke.mjs && node --check scripts/production-acceptance.mjs && node --test",
+    "check": "node --check server.js && node --check scripts/migrate.js && node --check scripts/integration-smoke.mjs && node --check scripts/production-acceptance.mjs && node --check scripts/contract-check.mjs && npm run contract:check && node --test",
     "test": "node --test",
     "test:integration": "node scripts/integration-smoke.mjs",
     "validate:live": "node scripts/production-acceptance.mjs",
+    "contract:check": "node scripts/contract-check.mjs",
     "build": "echo Build complete",
     "migrate": "node scripts/migrate.js",
     "validate:prod": "npm run check && npm run build"

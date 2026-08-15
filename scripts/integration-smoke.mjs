@@ -10,7 +10,7 @@ const base = `http://127.0.0.1:${port}`;
 const apiKey = 'integration-write-key-with-fixed-length';
 const issuerId = 'integration-issuer';
 const otherIssuerId = 'integration-other-issuer';
-const schemaVersion = '2026-08-14-vcard-v4';
+const schemaVersion = '2026-08-15-production-v5';
 const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
 const child = spawn(process.execPath, ['server.js'], {
   stdio: ['ignore', 'inherit', 'inherit'],
@@ -96,7 +96,15 @@ try {
   const issuerIsolation = await json(`/api/v1/registry/${encodeURIComponent(created.body.qrvid)}/revoke`, {
     method: 'POST', headers: otherIssuerHeaders, body: JSON.stringify({ reason: 'Must not cross issuer boundary' }),
   });
-  assert.equal(issuerIsolation.response.status, 404);
+  assert.equal(issuerIsolation.response.status, 403);
+  assert.equal(issuerIsolation.body.error.code, 'ISSUER_SCOPE_DENIED');
+
+  const oversizedMetadata = await json('/api/v1/registry/create', {
+    method: 'POST', headers: authHeaders,
+    body: JSON.stringify({ recordType: 'CERT', issuer: 'Integration Issuer', title: 'Metadata Limit', metadata: { value: 'x'.repeat(70000) } }),
+  });
+  assert.equal(oversizedMetadata.response.status, 422);
+  assert.equal(oversizedMetadata.body.error.code, 'INVALID_METADATA');
 
   const audit = await json(`/api/v1/registry/${encodeURIComponent(created.body.qrvid)}/audit`, { headers: authHeaders });
   assert.equal(audit.response.status, 200);

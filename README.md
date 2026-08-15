@@ -48,6 +48,8 @@ POST /api/v1/revoke
 POST /api/v1/registry/:qrvid/revoke
 ```
 
+The normative machine-readable contract is [`openapi/qrv-api-v1.yaml`](openapi/qrv-api-v1.yaml). `npm run contract:check` prevents route, schema-version, state, and environment drift.
+
 ## Verified Contact Cards
 
 QR-V supports dynamic, signed `VCARD` records with field-level disclosure, one-tap VCF download, aggregate analytics, and transactional bulk issuance. See [`docs/VERIFIED_CONTACT_CARD.md`](docs/VERIFIED_CONTACT_CARD.md).
@@ -139,6 +141,8 @@ SIGNING_PUBLIC_KEY_BASE64=
 CORS_ALLOWED_ORIGINS=https://qrv.network
 RATE_LIMIT_WINDOW_MS=60000
 RATE_LIMIT_MAX=180
+ISSUER_RATE_LIMIT_WINDOW_MS=60000
+ISSUER_RATE_LIMIT_MAX=60
 ```
 
 ## Production Gate
@@ -162,5 +166,13 @@ QRV_ACCEPTANCE_CONFIRM=CREATE_AND_REVOKE_TEST_RECORDS npm run validate:live
 ```
 
 The command creates two expressly identified acceptance records and revokes both before completion. See [`docs/PRODUCTION_DEPLOYMENT.md`](docs/PRODUCTION_DEPLOYMENT.md) for the ordered deployment and rollback procedure.
+
+Production governance and operations are defined in:
+
+- [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md)
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
+- [`docs/CRYPTOGRAPHIC_KEY_MANAGEMENT.md`](docs/CRYPTOGRAPHIC_KEY_MANAGEMENT.md)
+- [`docs/DATA_GOVERNANCE.md`](docs/DATA_GOVERNANCE.md)
+- [`SECURITY.md`](SECURITY.md)
 
 The consolidation removes `registry.qrv.network`, `verify.qrv.network`, `issuer.qrv.network`, `docs.qrv.network`, `developers.qrv.network`, and similar browser-facing services from the required production deployment topology. Those hostnames may remain temporarily as redirect-only compatibility endpoints.

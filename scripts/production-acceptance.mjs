@@ -6,7 +6,7 @@ const baseUrl = String(process.env.QRV_ACCEPTANCE_BASE_URL || 'https://api.qrv.n
 const apiKey = String(process.env.QRV_WRITE_API_KEY || '');
 const issuerId = String(process.env.QRV_ACCEPTANCE_ISSUER_ID || process.env.QRV_DEFAULT_ISSUER_ID || '');
 const platformOrigin = String(process.env.QRV_PUBLIC_BASE_URL || 'https://qrv.network').replace(/\/$/, '');
-const schemaVersion = '2026-08-14-vcard-v4';
+const schemaVersion = '2026-08-15-production-v5';
 const runId = crypto.randomUUID();
 
 if (confirmation !== 'CREATE_AND_REVOKE_TEST_RECORDS') {
