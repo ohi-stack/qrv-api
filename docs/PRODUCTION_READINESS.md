@@ -20,7 +20,7 @@ This document maps the QR-V production package to the seven-layer innovation blu
 - public, restricted, and private disclosure;
 - issuer-scoped reads and mutations;
 - request correlation IDs;
-- public and issuer mutation rate limits;
+- public, issuer-read, and issuer-mutation rate limits applied before protected database work;
 - production configuration, migration, integration, contract, dependency, container, CodeQL, and SBOM gates;
 - guarded live acceptance with express authorization to create and revoke test records.
 
