@@ -86,6 +86,13 @@ const issuerMutationRateLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const issuerReadRateLimiter = rateLimit({
+  windowMs: Number(process.env.ISSUER_READ_RATE_LIMIT_WINDOW_MS || 60000),
+  limit: Number(process.env.ISSUER_READ_RATE_LIMIT_MAX || 240),
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+});
+
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -350,10 +357,10 @@ async function readiness(_req, res) {
     return sendError(res, 503, 'DATABASE_UNAVAILABLE', 'Unable to query QR-V PostgreSQL registry');
   }
 }
-app.get('/readyz', readiness);
-app.get('/ready', readiness);
+app.get('/readyz', publicRateLimiter, readiness);
+app.get('/ready', publicRateLimiter, readiness);
 
-app.get('/metrics', requireWriteAuth, async (_req, res) => {
+app.get('/metrics', issuerReadRateLimiter, requireWriteAuth, async (_req, res) => {
   if (!requireDatabase(res)) return;
   try {
     const [records, audits, issuers] = await Promise.all([
@@ -367,7 +374,7 @@ app.get('/metrics', requireWriteAuth, async (_req, res) => {
   }
 });
 
-app.post('/api/v1/registry/create', requireWriteAuth, issuerMutationRateLimiter, async (req, res) => {
+app.post('/api/v1/registry/create', issuerMutationRateLimiter, requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   const body = req.body || {};
   const recordType = normalizeType(body.recordType || body.type || 'CERT');
@@ -578,7 +585,7 @@ app.get('/api/v1/vcards/:qrvid.vcf', publicRateLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/v1/issuer/vcards/:qrvid/update', requireWriteAuth, issuerMutationRateLimiter, async (req, res) => {
+app.post('/api/v1/issuer/vcards/:qrvid/update', issuerMutationRateLimiter, requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   const qrvid = normalizeQrvid(req.params.qrvid);
   if (!QRVID_FORMAT.test(qrvid)) return sendError(res, 422, 'INVALID_QRVID', 'QRVID format is invalid');
@@ -663,7 +670,7 @@ app.post('/api/v1/issuer/vcards/:qrvid/update', requireWriteAuth, issuerMutation
   }
 });
 
-app.post('/api/v1/issuer/vcards/bulk', requireWriteAuth, issuerMutationRateLimiter, async (req, res) => {
+app.post('/api/v1/issuer/vcards/bulk', issuerMutationRateLimiter, requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   const issuer = String(req.body?.issuer || req.body?.issuerName || '').trim();
   const entries = req.body?.cards;
@@ -765,7 +772,7 @@ app.post('/api/v1/issuer/vcards/bulk', requireWriteAuth, issuerMutationRateLimit
   }
 });
 
-app.get('/api/v1/issuer/vcards/:qrvid/analytics', requireWriteAuth, async (req, res) => {
+app.get('/api/v1/issuer/vcards/:qrvid/analytics', issuerReadRateLimiter, requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   const qrvid = normalizeQrvid(req.params.qrvid);
   try {
@@ -813,7 +820,7 @@ app.get('/api/v1/registry/:qrvid', publicRateLimiter, async (req, res) => {
   }
 });
 
-app.get('/api/v1/registry/hash/:hash', requireWriteAuth, async (req, res) => {
+app.get('/api/v1/registry/hash/:hash', issuerReadRateLimiter, requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   try {
     const result = await pool.query('SELECT * FROM qr_objects WHERE hash=$1 AND issuer_id=$2 ORDER BY created_at DESC LIMIT 25', [req.params.hash, req.issuerId]);
@@ -824,7 +831,7 @@ app.get('/api/v1/registry/hash/:hash', requireWriteAuth, async (req, res) => {
   }
 });
 
-app.get('/api/v1/registry/:qrvid/audit', requireWriteAuth, async (req, res) => {
+app.get('/api/v1/registry/:qrvid/audit', issuerReadRateLimiter, requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   const qrvid = normalizeQrvid(req.params.qrvid);
   try {
@@ -867,10 +874,10 @@ async function revokeRecord(req, res) {
   }
 }
 
-app.post('/api/v1/revoke', requireWriteAuth, issuerMutationRateLimiter, revokeRecord);
-app.post('/api/v1/registry/:qrvid/revoke', requireWriteAuth, issuerMutationRateLimiter, revokeRecord);
+app.post('/api/v1/revoke', issuerMutationRateLimiter, requireWriteAuth, revokeRecord);
+app.post('/api/v1/registry/:qrvid/revoke', issuerMutationRateLimiter, requireWriteAuth, revokeRecord);
 
-app.get('/api/v1/issuer/records', requireWriteAuth, async (req, res) => {
+app.get('/api/v1/issuer/records', issuerReadRateLimiter, requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   try {
     const limit = Math.min(Math.max(Number(req.query.limit || 50), 1), 100);
@@ -884,7 +891,7 @@ app.get('/api/v1/issuer/records', requireWriteAuth, async (req, res) => {
   }
 });
 
-app.get('/api/v1/issuer/records/:qrvid', requireWriteAuth, async (req, res) => {
+app.get('/api/v1/issuer/records/:qrvid', issuerReadRateLimiter, requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   try {
     const qrvid = normalizeQrvid(req.params.qrvid);
@@ -896,7 +903,7 @@ app.get('/api/v1/issuer/records/:qrvid', requireWriteAuth, async (req, res) => {
   }
 });
 
-app.get('/api/v1/issuer/analytics', requireWriteAuth, async (req, res) => {
+app.get('/api/v1/issuer/analytics', issuerReadRateLimiter, requireWriteAuth, async (req, res) => {
   if (!requireDatabase(res)) return;
   try {
     const result = await pool.query(
@@ -916,11 +923,11 @@ app.get('/api/v1/issuer/analytics', requireWriteAuth, async (req, res) => {
 // Transitional API aliases. These remain JSON-only and may be removed after client migration.
 app.get('/verify/:qrvid', (req, res) => res.redirect(308, `/api/v1/verify/${encodeURIComponent(req.params.qrvid)}`));
 app.get('/registry/:qrvid', (req, res) => res.redirect(308, `/api/v1/registry/${encodeURIComponent(req.params.qrvid)}`));
-app.post('/registry/create', requireWriteAuth, (req, res, next) => {
+app.post('/registry/create', (req, res, next) => {
   req.url = '/api/v1/registry/create';
   return app._router.handle(req, res, next);
 });
-app.post('/revoke', requireWriteAuth, revokeRecord);
+app.post('/revoke', issuerMutationRateLimiter, requireWriteAuth, revokeRecord);
 
 app.use((req, res) => sendError(res, 404, 'NOT_FOUND', `Route not found: ${req.method} ${req.path}`));
 app.use((error, _req, res, _next) => {
