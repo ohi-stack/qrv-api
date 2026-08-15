@@ -1,0 +1,5 @@
+* @ohi-stack
+/.github/ @ohi-stack
+/openapi/ @ohi-stack
+/scripts/migrate.js @ohi-stack
+/server.js @ohi-stack

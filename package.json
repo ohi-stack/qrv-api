@@ -1,24 +1,30 @@
 {
   "name": "qrv-api",
-  "version": "2.0.0",
-  "private": false,
+  "version": "2.1.0",
+  "private": true,
   "type": "module",
-  "description": "Canonical API and registry node for the consolidated QR-V Global Verification Network.",
+  "description": "Canonical JSON API, registry backend, and verified contact-card data plane for QR-V",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check scripts/migrate.js",
+    "check": "node --check server.js && node --check scripts/migrate.js && node --check scripts/integration-smoke.mjs && node --check scripts/production-acceptance.mjs && node --check scripts/contract-check.mjs && npm run contract:check && node --test",
+    "test": "node --test",
+    "test:integration": "node scripts/integration-smoke.mjs",
+    "validate:live": "node scripts/production-acceptance.mjs",
+    "contract:check": "node scripts/contract-check.mjs",
     "build": "echo Build complete",
     "migrate": "node scripts/migrate.js",
     "validate:prod": "npm run check && npm run build"
   },
-  "keywords": ["qrv", "verification", "api", "registry", "qr"],
+  "keywords": ["qrv", "verification", "api", "registry", "qr", "vcard", "contact-card"],
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
     "helmet": "^8.1.0",
+    "morgan": "^1.10.0",
     "pg": "^8.16.3"
   },
   "engines": {
