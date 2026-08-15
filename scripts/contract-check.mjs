@@ -39,7 +39,7 @@ assert.equal(schemaFromServer, schemaFromMigration, 'server and migration schema
 for (const key of [
   'DATABASE_URL', 'QRV_WRITE_API_KEY', 'QRV_DEFAULT_ISSUER_ID', 'REQUIRE_SIGNATURES',
   'SIGNING_PRIVATE_KEY', 'SIGNING_PUBLIC_KEY', 'CORS_ALLOWED_ORIGINS',
-  'RATE_LIMIT_MAX', 'ISSUER_RATE_LIMIT_MAX',
+  'RATE_LIMIT_MAX', 'ISSUER_RATE_LIMIT_MAX', 'ISSUER_READ_RATE_LIMIT_MAX',
 ]) {
   assert.match(files.env, new RegExp(`^${key}=`, 'm'), `.env.example is missing ${key}`);
 }
