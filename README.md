@@ -1,61 +1,53 @@
 # QR-V™ API — Canonical Backend Node
 
-`api.qrv.network` is the single backend node for the consolidated QR-V™ Global Verification Network.
+`api.qrv.network` is the private backend/data/API node for the QR-V™ Global Verification Network.
 
-## Canonical architecture
+## QR-V Production Architecture v1.0
 
 ```text
-Human users
-  ↓
+Human users / issuer users
+        ↓
 https://qrv.network
-  ↓ server-to-server
+        ↓ authenticated server-to-server calls
 https://api.qrv.network/api/v1
-  ↓
-PostgreSQL / Google Cloud SQL
+        ↓
+Canonical QR-V registry datastore
+        ↓
+records / certificates / issuers / hashes / audit logs
 ```
 
-There is no separate public registry application in the target architecture. Registry persistence, verification lookup, lifecycle mutation, audit access, and secured admin summaries are consolidated behind this API node.
+The production runtime uses only two active nodes:
 
-## 30-day commercial priority
+1. `qrv.network` — public platform/application layer.
+2. `api.qrv.network` — private backend/data/API layer.
 
-The backend must prioritize the **QR-V™ Verified Certificate Pilot** and the first paying external issuers.
+There is no separate public registry application in the target architecture. Registry persistence, verification lookup, lifecycle mutation, cryptographic processing, audit access, privileged admin reads, and server-side integrations belong behind this API node.
 
-Do not expand infrastructure unless it directly supports:
+## Strict responsibility boundary
 
-```text
-issuer approval/authentication
-→ entitlement
-→ production record creation
-→ QR verification
-→ expiration / revocation
-→ audit trail
-→ admin/revenue visibility
-```
+Everything privileged, persistent, cryptographic, or machine-facing belongs here.
 
-## Public platform routes
+The API node owns:
 
-Human-facing functionality belongs on `qrv.network`:
+- `/api/v1`;
+- PostgreSQL / managed database access;
+- record creation;
+- verification resolution;
+- deterministic lifecycle status;
+- revocation and expiration handling;
+- issuer authorization;
+- SHA-256 hashing;
+- Ed25519 signing/verification when production-ready;
+- audit logging;
+- webhooks;
+- server-side billing/entitlement checks;
+- rate limiting;
+- privileged admin API operations;
+- backend secrets.
 
-```text
-/verify
-/verify/:qrvid
-/issuer
-/issuer/dashboard
-/issuer/records
-/registry
-/registry/:qrvid
-/explorer
-/docs
-/developers
-/api-reference
-/status
-/store
-/admin
-```
+The public platform must not receive database credentials, Supabase secret/server keys, signing private keys, unrestricted admin secrets, or payment-provider secrets.
 
-`/admin` is private and must call protected admin API endpoints server-side.
-
-## API base
+## Canonical API base
 
 ```text
 https://api.qrv.network/api/v1
@@ -75,7 +67,7 @@ GET  /api/v1/records
 GET  /api/v1/audit/:qrvid
 ```
 
-Write/list/audit operations require server-side authorization. If the required secret or authenticated issuer context is missing, write operations fail closed.
+Write/list/audit operations require server-side authorization. If required authorization or issuer context is missing, operations fail closed.
 
 ## Admin API requirements
 
@@ -92,7 +84,7 @@ POST /api/v1/admin/issuers/:issuerId/approve
 POST /api/v1/admin/issuers/:issuerId/suspend
 ```
 
-Billing/revenue data should be joined or fetched through a secured server-side billing boundary rather than exposing payment-provider credentials to the public platform.
+Billing/revenue data must be joined or fetched through a secured server-side billing boundary rather than exposing payment-provider credentials to the public platform.
 
 The admin summary should be able to expose, when available:
 
@@ -106,7 +98,11 @@ The admin summary should be able to expose, when available:
 - suspicious/error events;
 - implementation revenue and contracted MRR summaries.
 
-## Database ownership
+## Database authority
+
+There must be exactly **one canonical registry datastore**.
+
+Current production contract: PostgreSQL / Google Cloud SQL via `DATABASE_URL`.
 
 Only this repository should receive production database credentials.
 
@@ -128,6 +124,21 @@ qr_audit_log
 ```
 
 Commercial implementations may require additional issuer entitlement/billing reference fields, but payment secrets must not be stored in ordinary registry records.
+
+## Supabase policy
+
+Supabase is optional, not additive.
+
+If QR-V later adopts Supabase as the canonical persistence layer, configure it **only on `api.qrv.network`** using server-side credentials such as:
+
+```env
+SUPABASE_URL=
+SUPABASE_SECRET_KEY=
+```
+
+and replace the PostgreSQL adapter intentionally.
+
+Do **not** run `DATABASE_URL` and Supabase as competing registry authorities. The production system must have one canonical source of truth.
 
 ## Deterministic public states
 
@@ -176,9 +187,32 @@ PORT=3000
 APP_VERSION=2.0.0
 QRV_PLATFORM_ORIGIN=https://qrv.network
 DATABASE_URL=
+DATABASE_POOL_MAX=20
+PG_CONNECTION_TIMEOUT_MS=5000
+PG_IDLE_TIMEOUT_MS=10000
+PGSSLMODE=require
 QRV_PLATFORM_API_KEY=
 CORS_ALLOWED_ORIGINS=https://qrv.network
-PGSSLMODE=require
+PUBLIC_RATE_WINDOW_MS=60000
+PUBLIC_RATE_LIMIT=240
+```
+
+`QRV_PLATFORM_API_KEY` must match the server-side key used by `qrv.network` and must never be exposed to browser JavaScript.
+
+## 30-day commercial priority
+
+The backend must prioritize the **QR-V™ Verified Certificate Pilot** and first paying external issuers.
+
+Do not expand infrastructure unless it directly supports:
+
+```text
+issuer approval/authentication
+→ entitlement
+→ production record creation
+→ QR verification
+→ expiration / revocation
+→ audit trail
+→ admin/revenue visibility
 ```
 
 ## Deployment
@@ -195,10 +229,10 @@ Domain: api.qrv.network
 
 ## Commercial acceptance gate
 
-Production v1 is commercially ready only when:
+QR-V Production Architecture v1.0 is commercially ready only when:
 
 1. `/healthz` returns 200.
-2. `/readyz` confirms PostgreSQL access.
+2. `/readyz` confirms canonical database access.
 3. an approved/authorized issuer can create a production certificate record.
 4. `qrv.network/verify/{QRVID}` returns `VERIFIED` through this API.
 5. expiration produces `EXPIRED` deterministically.
