@@ -1,59 +1,33 @@
 # QR-V™ API — Canonical Backend Node
 
-`api.qrv.network` is the private backend/data/API node for the QR-V™ Global Verification Network.
+`api.qrv.network` is the trusted backend, API, and canonical data boundary for the QR-V™ Global Verification Network.
 
-## QR-V Production Architecture v1.0
+## Production architecture
+
+QR-V uses exactly two runtime nodes:
+
+1. `qrv.network` — public platform/application node.
+2. `api.qrv.network` — trusted backend/API/data node.
 
 ```text
-Human users / issuer users
+Browser / issuer user
         ↓
 https://qrv.network
-        ↓ authenticated server-to-server calls
+        ↓ authenticated HTTPS
 https://api.qrv.network/api/v1
         ↓
 Canonical QR-V registry datastore
-        ↓
-records / certificates / issuers / hashes / audit logs
 ```
 
-The production runtime uses only two active nodes:
+All human-facing routes belong to `qrv.network`. All privileged, persistent, cryptographic, machine-facing, audit, and mutation logic belongs here.
 
-1. `qrv.network` — public platform/application layer.
-2. `api.qrv.network` — private backend/data/API layer.
-
-There is no separate public registry application in the target architecture. Registry persistence, verification lookup, lifecycle mutation, cryptographic processing, audit access, privileged admin reads, and server-side integrations belong behind this API node.
-
-## Strict responsibility boundary
-
-Everything privileged, persistent, cryptographic, or machine-facing belongs here.
-
-The API node owns:
-
-- `/api/v1`;
-- PostgreSQL / managed database access;
-- record creation;
-- verification resolution;
-- deterministic lifecycle status;
-- revocation and expiration handling;
-- issuer authorization;
-- SHA-256 hashing;
-- Ed25519 signing/verification when production-ready;
-- audit logging;
-- webhooks;
-- server-side billing/entitlement checks;
-- rate limiting;
-- privileged admin API operations;
-- backend secrets.
-
-The public platform must not receive database credentials, Supabase secret/server keys, signing private keys, unrestricted admin secrets, or payment-provider secrets.
-
-## Canonical API base
+## Canonical API
 
 ```text
 https://api.qrv.network/api/v1
 ```
 
-## Core endpoints
+Core endpoints:
 
 ```http
 GET  /healthz
@@ -61,59 +35,92 @@ GET  /readyz
 GET  /version
 GET  /api/v1/verify/:qrvid
 GET  /api/v1/records/:qrvid
+GET  /api/v1/records
 POST /api/v1/records
 POST /api/v1/records/:qrvid/revoke
-GET  /api/v1/records
 GET  /api/v1/audit/:qrvid
 ```
 
-Write/list/audit operations require server-side authorization. If required authorization or issuer context is missing, operations fail closed.
+The public platform may preserve `qrv.network/api/v1/*` as a compatibility/proxy surface, but authoritative backend execution occurs only on `api.qrv.network`.
 
-## Admin API requirements
+## Canonical datastore rule
 
-Protected administrative endpoints should support aggregated, least-privilege reads and audited mutations for:
+QR-V must have exactly one writable canonical registry authority.
+
+The preferred production contract supports Supabase as a managed PostgreSQL authority without creating a second registry:
+
+```env
+QRV_DATA_BACKEND=supabase-postgres
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SECRET_KEY=sb_secret_...
+DATABASE_URL=<postgres connection string from the SAME Supabase project>
+```
+
+`SUPABASE_SECRET_KEY` is server-only. The current Node API uses PostgreSQL for transactional registry operations; when Supabase is selected, `DATABASE_URL` must point to the PostgreSQL database belonging to the same Supabase project identified by `SUPABASE_URL`.
+
+Direct managed PostgreSQL/Cloud SQL remains supported as an explicit alternative:
+
+```env
+QRV_DATA_BACKEND=postgres
+DATABASE_URL=<canonical managed PostgreSQL URL>
+```
+
+Do not configure Supabase and Cloud SQL as two independent writable authorities.
+
+## Environment contract
+
+```env
+NODE_ENV=production
+PORT=3000
+APP_VERSION=2.1.0
+
+QRV_API_BASE_URL=https://api.qrv.network
+QRV_PUBLIC_BASE_URL=https://qrv.network
+QRV_PLATFORM_ORIGIN=https://qrv.network
+QRV_VERIFY_BASE_URL=https://qrv.network/verify
+QRV_REGISTRY_BASE_URL=https://qrv.network/registry
+
+QRV_DATA_BACKEND=supabase-postgres
+SUPABASE_URL=
+SUPABASE_SECRET_KEY=
+DATABASE_URL=
+DATABASE_POOL_MAX=20
+PG_CONNECTION_TIMEOUT_MS=5000
+PG_IDLE_TIMEOUT_MS=10000
+PGSSLMODE=require
+
+QRV_API_KEY=
+QRV_PLATFORM_API_KEY=
+QRV_WEBHOOK_SECRET=
+
+CORS_ORIGINS=https://qrv.network
+CORS_ALLOWED_ORIGINS=https://qrv.network
+LOG_LEVEL=info
+
+PUBLIC_RATE_WINDOW_MS=60000
+PUBLIC_RATE_LIMIT=240
+```
+
+`QRV_API_KEY` is the canonical protected server API secret. `QRV_PLATFORM_API_KEY` is retained temporarily as a compatibility alias for the same secret until every caller is migrated.
+
+## Secret-placement rule
+
+Never expose any of the following to browser JavaScript:
 
 ```text
-GET  /api/v1/admin/summary
-GET  /api/v1/admin/issuers
-GET  /api/v1/admin/issuers/:issuerId
-GET  /api/v1/admin/records
-GET  /api/v1/admin/verifications
-GET  /api/v1/admin/security-status
-POST /api/v1/admin/issuers/:issuerId/approve
-POST /api/v1/admin/issuers/:issuerId/suspend
+SUPABASE_SECRET_KEY
+DATABASE_URL
+QRV_API_KEY
+QRV_PLATFORM_API_KEY
+QRV_WEBHOOK_SECRET
+JWT_SECRET
+Ed25519 private signing keys
+database administrator credentials
 ```
 
-Billing/revenue data must be joined or fetched through a secured server-side billing boundary rather than exposing payment-provider credentials to the public platform.
+## Registry model
 
-The admin summary should be able to expose, when available:
-
-- paying issuers;
-- pilot issuers;
-- production records;
-- active / revoked / expired record counts;
-- verification counts by period;
-- API request counts;
-- signing state;
-- suspicious/error events;
-- implementation revenue and contracted MRR summaries.
-
-## Database authority
-
-There must be exactly **one canonical registry datastore**.
-
-Current production contract: PostgreSQL / Google Cloud SQL via `DATABASE_URL`.
-
-Only this repository should receive production database credentials.
-
-Run migrations with:
-
-```bash
-npm install
-npm run migrate
-```
-
-The migration creates or upgrades:
+The current migration provisions the core QR-V registry tables:
 
 ```text
 qr_objects
@@ -123,24 +130,18 @@ qr_hash_registry
 qr_audit_log
 ```
 
-Commercial implementations may require additional issuer entitlement/billing reference fields, but payment secrets must not be stored in ordinary registry records.
+Run:
 
-## Supabase policy
-
-Supabase is optional, not additive.
-
-If QR-V later adopts Supabase as the canonical persistence layer, configure it **only on `api.qrv.network`** using server-side credentials such as:
-
-```env
-SUPABASE_URL=
-SUPABASE_SECRET_KEY=
+```bash
+npm install
+npm run migrate
 ```
 
-and replace the PostgreSQL adapter intentionally.
+When using Supabase, the migration connection must target the same Supabase PostgreSQL project used in production.
 
-Do **not** run `DATABASE_URL` and Supabase as competing registry authorities. The production system must have one canonical source of truth.
+## Deterministic verification states
 
-## Deterministic public states
+Public verification state is limited to:
 
 ```text
 VERIFIED
@@ -149,95 +150,47 @@ EXPIRED
 NOT_FOUND
 ```
 
-Dependency failures are not converted into `VERIFIED` or `NOT_FOUND`.
+Infrastructure failures must not be converted into `NOT_FOUND` or `VERIFIED`; they are service failures.
 
-## Cryptographic production gate
+## Cryptographic state
 
-QRVP-1 requires SHA-256 integrity plus Ed25519 signatures. Treat these as distinct operational states.
-
-Ed25519 is production-ready only when:
-
-1. issuer keys are provisioned and protected;
-2. canonical record payloads are signed;
-3. signatures are persisted with the record;
-4. verification loads the issuer public key;
-5. invalid signatures fail verification;
-6. key rotation/revocation is auditable.
-
-Do not report `signatureValid: true` unless those checks actually execute successfully.
+SHA-256 integrity is active in the current implementation. Ed25519 must not be represented as operational until issuer key provisioning, canonical signing, signature persistence, public-key resolution, signature validation, key rotation, and failure handling are all implemented and tested.
 
 ## Security baseline
 
-- HTTPS in production.
+- HTTPS only in production.
 - Strict CORS allowlist for `https://qrv.network`.
-- PostgreSQL access only from the API node.
-- Parameterized SQL.
-- Server-side write authorization.
-- Public verification rate limiting.
-- Create, verify, revoke, issuer-admin, and privileged admin audit events.
-- Production writes fail closed when authorization is absent.
-- Admin endpoints require stronger authorization than ordinary issuer endpoints.
-- No database/payment/admin secrets returned to browser clients.
-
-## Production environment
-
-```env
-NODE_ENV=production
-PORT=3000
-APP_VERSION=2.0.0
-QRV_PLATFORM_ORIGIN=https://qrv.network
-DATABASE_URL=
-DATABASE_POOL_MAX=20
-PG_CONNECTION_TIMEOUT_MS=5000
-PG_IDLE_TIMEOUT_MS=10000
-PGSSLMODE=require
-QRV_PLATFORM_API_KEY=
-CORS_ALLOWED_ORIGINS=https://qrv.network
-PUBLIC_RATE_WINDOW_MS=60000
-PUBLIC_RATE_LIMIT=240
-```
-
-`QRV_PLATFORM_API_KEY` must match the server-side key used by `qrv.network` and must never be exposed to browser JavaScript.
-
-## 30-day commercial priority
-
-The backend must prioritize the **QR-V™ Verified Certificate Pilot** and first paying external issuers.
-
-Do not expand infrastructure unless it directly supports:
-
-```text
-issuer approval/authentication
-→ entitlement
-→ production record creation
-→ QR verification
-→ expiration / revocation
-→ audit trail
-→ admin/revenue visibility
-```
+- Database access only from this backend boundary.
+- Parameterized SQL and transactional writes.
+- Protected issuance and revocation.
+- Rate-limited public verification.
+- Auditable create, verify, revoke, and privileged operations.
+- Fail-closed writes when API authorization is missing.
+- No backend secrets returned to clients.
 
 ## Deployment
 
 ```text
 Repository: ohi-stack/qrv-api
 Branch: main
-Node: 20+
+Runtime: Node.js 20+
 Install: npm install
 Migration: npm run migrate
 Start: npm start
 Domain: api.qrv.network
 ```
 
-## Commercial acceptance gate
+## Production acceptance
 
-QR-V Production Architecture v1.0 is commercially ready only when:
+A production release is accepted only when:
 
-1. `/healthz` returns 200.
-2. `/readyz` confirms canonical database access.
-3. an approved/authorized issuer can create a production certificate record.
-4. `qrv.network/verify/{QRVID}` returns `VERIFIED` through this API.
-5. expiration produces `EXPIRED` deterministically.
-6. an authorized revoke operation changes the same public URL to `REVOKED`.
-7. audit events exist for creation, verification, revocation, and privileged admin changes.
-8. admin summary metrics can be retrieved without exposing privileged credentials.
-9. billing/entitlement state can prevent unauthorized issuance.
-10. Ed25519 status is reported truthfully and fails closed when signature validation is required but unavailable.
+1. `/healthz` returns HTTP 200.
+2. `/readyz` confirms access to the canonical registry.
+3. an authorized issuer can create a record.
+4. `qrv.network/verify/{QRVID}` resolves through this API.
+5. the record returns `VERIFIED` when valid.
+6. expiration returns `EXPIRED` deterministically.
+7. revocation changes the same public URL to `REVOKED`.
+8. missing records return `NOT_FOUND`.
+9. audit events exist for issuance, verification, and revocation.
+10. the configured data authority is singular and traceable to the intended Supabase/PostgreSQL project.
