@@ -1,0 +1,91 @@
+name: QR-V API Production Readiness
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-api-node:
+    name: Validate api.qrv.network backend node
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: qrv
+          POSTGRES_USER: qrv
+          POSTGRES_PASSWORD: qrv
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Static checks
+        run: npm run check
+
+      - name: Run migration
+        env:
+          DATABASE_URL: postgres://qrv:qrv@127.0.0.1:5432/qrv
+          PGSSLMODE: disable
+        run: npm run migrate
+
+      - name: Start API node
+        env:
+          NODE_ENV: production
+          PORT: 3000
+          APP_VERSION: ci
+          QRV_PUBLIC_BASE_URL: http://127.0.0.1:3001
+          QRV_PLATFORM_ORIGIN: http://127.0.0.1:3001
+          QRV_VERIFY_BASE_URL: http://127.0.0.1:3001/verify
+          QRV_REGISTRY_BASE_URL: http://127.0.0.1:3001/registry
+          QRV_API_KEY: ci-api-key
+          QRV_PLATFORM_API_KEY: ci-api-key
+          QRV_WEBHOOK_SECRET: ci-webhook-secret
+          CORS_ORIGINS: http://127.0.0.1:3001
+          DATABASE_URL: postgres://qrv:qrv@127.0.0.1:5432/qrv
+          PGSSLMODE: disable
+        run: |
+          npm start > /tmp/qrv-api.log 2>&1 &
+          echo $! > /tmp/qrv-api.pid
+          sleep 3
+
+      - name: Validate backend health routes
+        run: |
+          set -euo pipefail
+          for path in /healthz /readyz /version /api/v1/status; do
+            code=$(curl -sS -o /tmp/response.txt -w '%{http_code}' "http://127.0.0.1:3000${path}")
+            echo "$path -> $code"
+            cat /tmp/response.txt
+            test "$code" -ge 200
+            test "$code" -lt 400
+          done
+
+      - name: Stop API node
+        if: always()
+        run: |
+          if [ -f /tmp/qrv-api.pid ]; then kill $(cat /tmp/qrv-api.pid) || true; fi
+          cat /tmp/qrv-api.log || true
