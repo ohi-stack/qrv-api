@@ -1,15 +1,16 @@
 {
   "name": "qrv-api",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": false,
   "type": "module",
   "description": "Canonical API and registry node for the consolidated QR-V Global Verification Network.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check scripts/migrate.js",
+    "check": "node --check server.js && node --check scripts/migrate.js && node --check scripts/acceptance-live.mjs",
     "build": "echo Build complete",
     "migrate": "node scripts/migrate.js",
+    "acceptance:live": "node scripts/acceptance-live.mjs",
     "validate:prod": "npm run check && npm run build"
   },
   "keywords": ["qrv", "verification", "api", "registry", "qr"],
