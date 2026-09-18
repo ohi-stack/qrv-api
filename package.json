@@ -7,13 +7,20 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check scripts/migrate.js && node --check scripts/acceptance-live.mjs",
+    "check": "node --check server.js && node --check scripts/migrate.js && node --check scripts/acceptance-live.mjs && node scripts/validate-openapi.mjs",
     "build": "echo Build complete",
     "migrate": "node scripts/migrate.js",
     "acceptance:live": "node scripts/acceptance-live.mjs",
-    "validate:prod": "npm run check && npm run build"
+    "validate:prod": "npm run check && npm run build",
+    "check:openapi": "node scripts/validate-openapi.mjs"
   },
-  "keywords": ["qrv", "verification", "api", "registry", "qr"],
+  "keywords": [
+    "qrv",
+    "verification",
+    "api",
+    "registry",
+    "qr"
+  ],
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",

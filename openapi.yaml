@@ -1,0 +1,246 @@
+openapi: 3.1.0
+info:
+  title: QR-V™ Global Verification Network API
+  version: 2.1.1
+  description: |
+    Normative machine contract for api.qrv.network. This file documents only
+    implemented API behavior. Planned endpoint families are tracked separately
+    and must not be presented as operational until implemented and accepted.
+servers:
+  - url: https://api.qrv.network
+    description: Production
+tags:
+  - name: Operations
+  - name: Verification
+  - name: Registry
+  - name: Audit
+paths:
+  /healthz:
+    get:
+      tags: [Operations]
+      operationId: getHealth
+      responses:
+        '200':
+          description: Process health
+  /readyz:
+    get:
+      tags: [Operations]
+      operationId: getReadiness
+      responses:
+        '200':
+          description: API and canonical registry are ready
+        '503':
+          description: Canonical registry is unavailable or not configured
+  /version:
+    get:
+      tags: [Operations]
+      operationId: getVersion
+      responses:
+        '200':
+          description: Deployed API version and cryptographic feature state
+  /api/v1/status:
+    get:
+      tags: [Operations]
+      operationId: getStatus
+      responses:
+        '200':
+          description: API and datastore operational
+        '503':
+          description: API is not ready
+  /api/v1/verify/{qrvid}:
+    get:
+      tags: [Verification]
+      operationId: verifyRecord
+      parameters:
+        - $ref: '#/components/parameters/Qrvid'
+      responses:
+        '200':
+          description: Deterministic verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationRecord'
+        '404':
+          description: QRVID not found
+        '422':
+          description: Invalid QRVID format
+        '429':
+          description: Public verification rate limit exceeded
+        '500':
+          description: Verification failed; no verification state is asserted
+  /api/v1/records:
+    get:
+      tags: [Registry]
+      operationId: listRecords
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 250
+            default: 50
+      responses:
+        '200':
+          description: Authorized registry record list
+        '401':
+          description: API authorization required
+        '503':
+          description: Database or write authorization not configured
+    post:
+      tags: [Registry]
+      operationId: createRecord
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecordRequest'
+      responses:
+        '201':
+          description: Canonical record created
+        '401':
+          description: API authorization required
+        '422':
+          description: Invalid record input
+        '503':
+          description: Database or write authorization not configured
+  /api/v1/records/{qrvid}:
+    get:
+      tags: [Registry]
+      operationId: getRecord
+      parameters:
+        - $ref: '#/components/parameters/Qrvid'
+      responses:
+        '200':
+          description: Public-safe canonical record
+        '404':
+          description: QRVID not found
+        '429':
+          description: Public lookup rate limit exceeded
+  /api/v1/records/{qrvid}/revoke:
+    post:
+      tags: [Registry]
+      operationId: revokeRecord
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Qrvid'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason:
+                  type: [string, 'null']
+      responses:
+        '200':
+          description: Record revoked
+        '401':
+          description: API authorization required
+        '404':
+          description: QRVID not found
+        '503':
+          description: Database or write authorization not configured
+  /api/v1/audit/{qrvid}:
+    get:
+      tags: [Audit]
+      operationId: getAuditHistory
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Qrvid'
+      responses:
+        '200':
+          description: Authorized audit history
+        '401':
+          description: API authorization required
+        '503':
+          description: Database or write authorization not configured
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+  parameters:
+    Qrvid:
+      name: qrvid
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^QRV-[A-Z0-9][A-Z0-9-]{2,127}$'
+  schemas:
+    CreateRecordRequest:
+      type: object
+      additionalProperties: true
+      required: [recordType, issuer]
+      properties:
+        recordType:
+          type: string
+        issuer:
+          type: string
+        owner:
+          type: [string, 'null']
+        recipient:
+          type: [string, 'null']
+        title:
+          type: [string, 'null']
+        certificateTitle:
+          type: [string, 'null']
+        issueDate:
+          type: [string, 'null']
+          format: date
+        expirationDate:
+          type: [string, 'null']
+          format: date
+        metadata:
+          type: object
+    VerificationRecord:
+      type: object
+      required: [qrvid, state, status, verified]
+      properties:
+        qrvid:
+          type: string
+        state:
+          type: string
+          enum: [VERIFIED, REVOKED, EXPIRED, NOT_FOUND]
+        status:
+          type: string
+        verified:
+          type: boolean
+        recordType:
+          type: [string, 'null']
+        issuer:
+          type: [string, 'null']
+        owner:
+          type: [string, 'null']
+        recipient:
+          type: [string, 'null']
+        title:
+          type: [string, 'null']
+        issueDate:
+          type: [string, 'null']
+        expirationDate:
+          type: [string, 'null']
+        hash:
+          type: [string, 'null']
+        canonicalUrl:
+          type: [string, 'null']
+        integrity:
+          type: object
+          properties:
+            hashAlgorithm:
+              type: string
+            hashPresent:
+              type: boolean
+            signatureValid:
+              type: [boolean, 'null']
