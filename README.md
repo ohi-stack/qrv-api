@@ -46,6 +46,11 @@ GET  /api/v1/registry/:qrvid/audit
 POST /api/v1/registry/create
 POST /api/v1/revoke
 POST /api/v1/registry/:qrvid/revoke
+
+GET  /api/v1/issuer/signing-keys
+POST /api/v1/issuer/signing-keys
+POST /api/v1/issuer/signing-keys/rotate
+POST /api/v1/issuer/signing-keys/:kid/status
 ```
 
 The normative machine-readable contract is [`openapi/qrv-api-v1.yaml`](openapi/qrv-api-v1.yaml). `npm run contract:check` prevents route, schema-version, state, and environment drift.
@@ -100,6 +105,7 @@ qr_objects
 qr_issuers
 qr_hash_registry
 qr_certificates
+qr_signing_keys
 qr_audit_log
 registry_records view
 ```
@@ -135,6 +141,7 @@ QRV_WRITE_API_KEY=
 REQUIRE_SIGNATURES=true
 SIGNING_PRIVATE_KEY=
 SIGNING_PUBLIC_KEY=
+SIGNING_KEY_ID=
 # Base64 alternatives may be used when the deployment panel cannot preserve PEM line breaks.
 SIGNING_PRIVATE_KEY_BASE64=
 SIGNING_PUBLIC_KEY_BASE64=
@@ -160,6 +167,8 @@ A release is complete only when:
 7. revocation succeeds;
 8. the same public route renders `REVOKED`;
 9. create, verify, and revoke audit events exist.
+
+Issuance and verification bind signatures to the issuer-scoped `SIGNING_KEY_ID` registered in `qr_signing_keys`; `/readyz` fails closed until the database key and deployment key match.
 
 Run the guarded live gate only after the production hostname, database, and secrets are configured:
 
