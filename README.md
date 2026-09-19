@@ -21,7 +21,20 @@ Canonical QR-V registry datastore
 
 All human-facing routes belong to `qrv.network`. All privileged, persistent, cryptographic, machine-facing, audit, and mutation logic belongs here.
 
+## Normative API authority
+
+The machine-readable OpenAPI specification is the target normative contract for API paths, schemas, authentication, errors, and versioning. README endpoint lists and manually written API sitemaps are explanatory only.
+
+See:
+
+```text
+docs/NORMATIVE_OPENAPI_POLICY.md
+```
+
+Until the normative OpenAPI file is present and contract-tested, the implemented `server.js` routes remain the executable compatibility baseline and API expansion is release-gated.
+
 ## Canonical API
+
 
 ```text
 https://api.qrv.network/api/v1
