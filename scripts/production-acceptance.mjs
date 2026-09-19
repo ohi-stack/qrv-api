@@ -6,7 +6,7 @@ const baseUrl = String(process.env.QRV_ACCEPTANCE_BASE_URL || 'https://api.qrv.n
 const apiKey = String(process.env.QRV_WRITE_API_KEY || '');
 const issuerId = String(process.env.QRV_ACCEPTANCE_ISSUER_ID || process.env.QRV_DEFAULT_ISSUER_ID || '');
 const platformOrigin = String(process.env.QRV_PUBLIC_BASE_URL || 'https://qrv.network').replace(/\/$/, '');
-const schemaVersion = '2026-08-15-production-v5';
+const schemaVersion = '2026-09-05-production-v6';
 const runId = crypto.randomUUID();
 
 if (confirmation !== 'CREATE_AND_REVOKE_TEST_RECORDS') {
@@ -55,6 +55,7 @@ try {
   assert.equal(ready.body?.ready, true);
   assert.equal(ready.body?.schemaVersion, schemaVersion);
   assert.equal(ready.body?.signingKeyPairValid, true);
+  assert.match(ready.body?.signingKeyId || '', /^ed25519-[a-f0-9]{24}$/);
 
   const unauthorized = await request('/api/v1/registry/create', {
     method: 'POST',
@@ -77,6 +78,7 @@ try {
   });
   assert.equal(publicCreate.response.status, 201);
   assert.match(publicCreate.body?.qrvid || '', /^QRV-PROD-CERT-[0-9]{6,}$/);
+  assert.equal(publicCreate.body?.signingKeyId, ready.body.signingKeyId);
   createdQrvids.push(publicCreate.body.qrvid);
 
   const publicVerify = await request(`/api/v1/verify/${encodeURIComponent(publicCreate.body.qrvid)}`, {
@@ -87,6 +89,8 @@ try {
   assert.equal(publicVerify.body?.verificationState, 'VERIFIED');
   assert.equal(publicVerify.body?.integrity?.hashValid, true);
   assert.equal(publicVerify.body?.integrity?.signatureValid, true);
+  assert.equal(publicVerify.body?.integrity?.signingKeyId, ready.body.signingKeyId);
+  assert.equal(publicVerify.body?.integrity?.signingKeyStatus, 'active');
 
   const privateCreate = await request('/api/v1/registry/create', {
     method: 'POST',

@@ -30,9 +30,9 @@ This document maps the QR-V production package to the seven-layer innovation blu
 2. Route `api.qrv.network` directly to this JSON service without an issuer-login redirect.
 3. Restrict the database firewall to the API runtime and administrative migration path.
 4. Install a 32-byte-or-longer write credential, approved issuer ID, matching Ed25519 key pair, strict CORS origin, and TLS-verifying database URL.
-5. Apply migration `2026-08-15-production-v5` against a production-shaped copy before production.
+5. Apply migration `2026-09-05-production-v6` against a production-shaped copy before production and register the issuer's public key in `qr_signing_keys`.
 6. Configure uptime checks for `/healthz` and `/readyz`, but do not expose write credentials to the monitor.
-7. Configure logs and alerts for readiness failures, 5xx rates, authentication failures, rate-limit saturation, database pool errors, signature failures, and migration mismatch.
+7. Configure logs and alerts for readiness failures, 5xx rates, authentication failures, rate-limit saturation, database pool errors, signature failures, signing-key compromise, and migration mismatch.
 8. Run the guarded live acceptance and retain the resulting QRVIDs and release commit in the release record.
 
 ## Explicit exclusions

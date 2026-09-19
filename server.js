@@ -12,6 +12,13 @@ import {
   publicContactCard,
   renderVCard,
 } from './lib/vcard.js';
+import {
+  deriveKeyId,
+  getActiveSigningKey,
+  getSigningKey,
+  signHashWithKey,
+  verifyHashWithKey,
+} from './lib/signingKeys.js';
 
 dotenv.config();
 const { Pool } = pkg;
@@ -27,7 +34,7 @@ const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = process.env.APP_VERSION || '2.1.0';
 const SERVICE = 'qrv-api';
-const SCHEMA_VERSION = '2026-08-15-production-v5';
+const SCHEMA_VERSION = '2026-09-05-production-v6';
 const MIN_WRITE_API_KEY_BYTES = 32;
 const STARTED_AT = new Date().toISOString();
 const PUBLIC_BASE_URL = String(process.env.QRV_PUBLIC_BASE_URL || 'https://qrv.network').replace(/\/$/, '');
@@ -49,6 +56,7 @@ function readSigningKey(raw, encoded) {
 
 const SIGNING_PRIVATE_KEY = readSigningKey(process.env.SIGNING_PRIVATE_KEY, process.env.SIGNING_PRIVATE_KEY_BASE64);
 const SIGNING_PUBLIC_KEY = readSigningKey(process.env.SIGNING_PUBLIC_KEY, process.env.SIGNING_PUBLIC_KEY_BASE64);
+const SIGNING_KEY_ID = String(process.env.SIGNING_KEY_ID || '').trim();
 
 const allowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS || PUBLIC_BASE_URL)
   .split(',')
@@ -198,19 +206,44 @@ function hashPayload(payload) {
   return crypto.createHash('sha256').update(JSON.stringify(canonicalize(payload))).digest('hex');
 }
 
-function signHash(hash) {
-  if (!SIGNING_PRIVATE_KEY) return null;
-  return crypto.sign(null, Buffer.from(hash, 'utf8'), SIGNING_PRIVATE_KEY).toString('base64');
+function configuredSigningKeyId() {
+  if (SIGNING_KEY_ID) return SIGNING_KEY_ID;
+  if (!SIGNING_PUBLIC_KEY) return '';
+  try {
+    return deriveKeyId(SIGNING_PUBLIC_KEY);
+  } catch (_error) {
+    return '';
+  }
 }
 
-function verifySignature(hash, signature) {
-  if (!signature) return !REQUIRE_SIGNATURES;
-  if (!SIGNING_PUBLIC_KEY) return !REQUIRE_SIGNATURES;
+function attachPrivateKey(key) {
+  if (!key || !SIGNING_PRIVATE_KEY) return null;
+  const configuredKid = configuredSigningKeyId();
+  if (configuredKid && configuredKid !== key.kid) return null;
   try {
-    return crypto.verify(null, Buffer.from(hash, 'utf8'), SIGNING_PUBLIC_KEY, Buffer.from(signature, 'base64'));
+    const probe = Buffer.from('qrv-signing-registry-binding-v1', 'utf8');
+    const signature = crypto.sign(null, probe, SIGNING_PRIVATE_KEY);
+    if (!crypto.verify(null, probe, key.public_key, signature)) return null;
+    return { ...key, publicKey: key.public_key, privateKey: SIGNING_PRIVATE_KEY };
   } catch (_error) {
-    return false;
+    return null;
   }
+}
+
+async function resolveActiveSigningKey(queryable, issuerId) {
+  const registeredKey = await getActiveSigningKey(queryable, issuerId);
+  return attachPrivateKey(registeredKey);
+}
+
+async function signHashForIssuer(queryable, issuerId, hash) {
+  const key = await resolveActiveSigningKey(queryable, issuerId);
+  if (!key) {
+    if (!REQUIRE_SIGNATURES) return { signature: null, key: null };
+    const error = new Error('A matching active issuer signing key is required');
+    error.code = 'SIGNING_KEY_NOT_READY';
+    throw error;
+  }
+  return { signature: signHashWithKey(hash, key), key };
 }
 
 function signingKeyPairValid() {
@@ -221,6 +254,25 @@ function signingKeyPairValid() {
     return crypto.verify(null, probe, SIGNING_PUBLIC_KEY, signature);
   } catch (_error) {
     return false;
+  }
+}
+
+function parsePublicSigningKey(value) {
+  const raw = String(value || '').replace(/\\n/g, '\n').trim();
+  if (!raw || /PRIVATE KEY/i.test(raw)) {
+    const error = new Error('An Ed25519 public key PEM is required');
+    error.code = 'INVALID_SIGNING_PUBLIC_KEY';
+    throw error;
+  }
+  try {
+    const keyObject = crypto.createPublicKey(raw);
+    if (keyObject.asymmetricKeyType !== 'ed25519') throw new Error('Key algorithm must be Ed25519');
+    const publicKey = keyObject.export({ type: 'spki', format: 'pem' }).toString();
+    return { publicKey, kid: deriveKeyId(publicKey) };
+  } catch (_error) {
+    const error = new Error('The signing public key is not a valid Ed25519 public key');
+    error.code = 'INVALID_SIGNING_PUBLIC_KEY';
+    throw error;
   }
 }
 
@@ -270,7 +322,12 @@ function publicVerificationRecord(row, status, integrity) {
     expiresAt: row.expires_at || null,
     revokedAt: row.revoked_at || null,
     visibility: row.visibility || 'public',
-    integrity,
+    integrity: {
+      hashAlgorithm: 'SHA-256',
+      signatureAlgorithm: row.signature_algorithm ? 'Ed25519' : null,
+      signingKeyId: row.signing_key_id || null,
+      ...(integrity || {}),
+    },
     verifyUrl: publicVerifyUrl(row.qrvid),
   };
   const contact = row.record_type === 'VCARD' && status === 'VERIFIED'
@@ -311,6 +368,10 @@ function apiRoot() {
       '/api/v1/registry/:qrvid/audit',
       '/api/v1/vcards/:qrvid.vcf',
       'POST /api/v1/registry/create',
+      'GET /api/v1/issuer/signing-keys',
+      'POST /api/v1/issuer/signing-keys',
+      'POST /api/v1/issuer/signing-keys/rotate',
+      'POST /api/v1/issuer/signing-keys/:kid/status',
       'POST /api/v1/issuer/vcards/:qrvid/update',
       'POST /api/v1/issuer/vcards/bulk',
       'POST /api/v1/revoke',
@@ -327,8 +388,8 @@ app.get('/version', (_req, res) => res.json({ ok: true, service: SERVICE, versio
 
 async function readiness(_req, res) {
   if (!pool) return sendError(res, 503, 'DATABASE_NOT_CONFIGURED', 'DATABASE_URL is required');
-  if (REQUIRE_SIGNATURES && !signingKeyPairValid()) {
-    return sendError(res, 503, 'SIGNING_NOT_READY', 'A valid matching Ed25519 signing key pair is required');
+  if (REQUIRE_SIGNATURES && !SIGNING_PRIVATE_KEY) {
+    return sendError(res, 503, 'SIGNING_NOT_READY', 'SIGNING_PRIVATE_KEY is required when signatures are enabled');
   }
   if (!WRITE_API_KEY) return sendError(res, 503, 'WRITE_AUTH_NOT_CONFIGURED', 'QRV_WRITE_API_KEY is required');
   if (Buffer.byteLength(WRITE_API_KEY) < MIN_WRITE_API_KEY_BYTES) {
@@ -343,16 +404,23 @@ async function readiness(_req, res) {
       to_regclass('public.qr_issuers') AS qr_issuers,
       to_regclass('public.qr_hash_registry') AS qr_hash_registry,
       to_regclass('public.qr_certificates') AS qr_certificates,
+      to_regclass('public.qr_signing_keys') AS qr_signing_keys,
       to_regclass('public.qrv_schema_migrations') AS qrv_schema_migrations,
       to_regclass('public.qrv_record_seq') AS qrv_record_seq,
       to_regclass('public.registry_records') AS registry_records`);
     const requiredRelations = Object.values(relations.rows[0] || {});
-    if (requiredRelations.length !== 8 || requiredRelations.some((relation) => !relation)) {
+    if (requiredRelations.length !== 9 || requiredRelations.some((relation) => !relation)) {
       return sendError(res, 503, 'MIGRATION_REQUIRED', 'Required QR-V schema relations are absent');
     }
     const migration = await pool.query('SELECT 1 FROM qrv_schema_migrations WHERE version=$1 LIMIT 1', [SCHEMA_VERSION]);
     if (!migration.rows.length) return sendError(res, 503, 'MIGRATION_REQUIRED', `Required schema version ${SCHEMA_VERSION} is not applied`);
-    return res.json({ ok: true, ready: true, service: SERVICE, database: 'connected', schemaVersion: SCHEMA_VERSION, signaturesRequired: REQUIRE_SIGNATURES, signingKeyPairValid: REQUIRE_SIGNATURES ? true : null, timestamp: now() });
+    const activeSigningKey = REQUIRE_SIGNATURES
+      ? await resolveActiveSigningKey(pool, DEFAULT_ISSUER_ID)
+      : null;
+    if (REQUIRE_SIGNATURES && !activeSigningKey) {
+      return sendError(res, 503, 'SIGNING_NOT_READY', 'No active registered Ed25519 key matches the API signing secret');
+    }
+    return res.json({ ok: true, ready: true, service: SERVICE, database: 'connected', schemaVersion: SCHEMA_VERSION, signaturesRequired: REQUIRE_SIGNATURES, signingKeyPairValid: REQUIRE_SIGNATURES ? true : null, signingKeyId: activeSigningKey?.kid || null, timestamp: now() });
   } catch (_error) {
     return sendError(res, 503, 'DATABASE_UNAVAILABLE', 'Unable to query QR-V PostgreSQL registry');
   }
@@ -371,6 +439,148 @@ app.get('/metrics', issuerReadRateLimiter, requireWriteAuth, async (_req, res) =
     return res.json({ ok: true, service: SERVICE, records: records.rows[0].count, auditEvents: audits.rows[0].count, issuers: issuers.rows[0].count, timestamp: now() });
   } catch (_error) {
     return sendError(res, 500, 'METRICS_FAILED', 'Unable to read registry metrics');
+  }
+});
+
+app.get('/api/v1/issuer/signing-keys', issuerReadRateLimiter, requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  try {
+    const result = await pool.query(
+      `SELECT kid, algorithm, status, valid_from, retired_at, revoked_at, compromised_at, created_at, updated_at
+         FROM qr_signing_keys
+        WHERE issuer_id=$1
+        ORDER BY valid_from DESC, created_at DESC`,
+      [req.issuerId],
+    );
+    return res.json({ ok: true, issuerId: req.issuerId, keys: result.rows, timestamp: now() });
+  } catch (_error) {
+    return sendError(res, 500, 'SIGNING_KEY_LIST_FAILED', 'Unable to list issuer signing keys');
+  }
+});
+
+app.post('/api/v1/issuer/signing-keys', issuerMutationRateLimiter, requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  let parsed;
+  try {
+    parsed = parsePublicSigningKey(req.body?.publicKey);
+  } catch (error) {
+    return sendError(res, 422, error.code || 'INVALID_SIGNING_PUBLIC_KEY', error.message);
+  }
+  if (req.body?.kid && String(req.body.kid).trim() !== parsed.kid) {
+    return sendError(res, 422, 'SIGNING_KEY_ID_MISMATCH', 'kid must match the supplied Ed25519 public key');
+  }
+  const metadata = req.body?.metadata && typeof req.body.metadata === 'object' && !Array.isArray(req.body.metadata)
+    ? req.body.metadata
+    : {};
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const issuerResult = await client.query(
+      `INSERT INTO qr_issuers (issuer_id, issuer_name, status)
+       VALUES ($1,$2,'active')
+       ON CONFLICT (issuer_id) DO UPDATE SET updated_at=NOW()
+       RETURNING status`,
+      [req.issuerId, String(req.body?.issuerName || req.issuerId).trim().slice(0, 255)],
+    );
+    if (issuerResult.rows[0]?.status !== 'active') {
+      await client.query('ROLLBACK');
+      return sendError(res, 403, 'ISSUER_INACTIVE', 'Issuer is not active');
+    }
+    const result = await client.query(
+      `INSERT INTO qr_signing_keys (issuer_id, kid, algorithm, public_key, status, metadata)
+       VALUES ($1,$2,'ed25519',$3,'active',$4)
+       RETURNING kid, algorithm, status, valid_from, created_at`,
+      [req.issuerId, parsed.kid, parsed.publicKey, metadata],
+    );
+    await audit(parsed.kid, 'signing_key_activated', { issuerId: req.issuerId, signingKeyId: parsed.kid, result: 'ACTIVE', requestId: req.requestId }, client);
+    await client.query('COMMIT');
+    return res.status(201).json({ ok: true, issuerId: req.issuerId, key: result.rows[0], timestamp: now() });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (String(error.code) === '23505') return sendError(res, 409, 'SIGNING_KEY_CONFLICT', 'An active signing key already exists or this kid is already registered');
+    console.error('Signing key registration failed:', error);
+    return sendError(res, 500, 'SIGNING_KEY_REGISTER_FAILED', 'Unable to register signing key');
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/v1/issuer/signing-keys/rotate', issuerMutationRateLimiter, requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  let parsed;
+  try {
+    parsed = parsePublicSigningKey(req.body?.publicKey);
+  } catch (error) {
+    return sendError(res, 422, error.code || 'INVALID_SIGNING_PUBLIC_KEY', error.message);
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const issuerResult = await client.query('SELECT status FROM qr_issuers WHERE issuer_id=$1 FOR UPDATE', [req.issuerId]);
+    if (issuerResult.rows[0]?.status !== 'active') {
+      await client.query('ROLLBACK');
+      return sendError(res, 403, 'ISSUER_INACTIVE', 'Issuer must be active before key rotation');
+    }
+    const retired = await client.query(
+      `UPDATE qr_signing_keys SET status='retired', retired_at=COALESCE(retired_at,NOW()), updated_at=NOW()
+       WHERE issuer_id=$1 AND status='active' RETURNING kid`,
+      [req.issuerId],
+    );
+    const inserted = await client.query(
+      `INSERT INTO qr_signing_keys (issuer_id, kid, algorithm, public_key, status, metadata)
+       VALUES ($1,$2,'ed25519',$3,'active',$4)
+       RETURNING kid, algorithm, status, valid_from, created_at`,
+      [req.issuerId, parsed.kid, parsed.publicKey, req.body?.metadata || {}],
+    );
+    for (const key of retired.rows) {
+      await audit(key.kid, 'signing_key_retired', { issuerId: req.issuerId, signingKeyId: key.kid, result: 'RETIRED', requestId: req.requestId }, client);
+    }
+    await audit(parsed.kid, 'signing_key_activated', { issuerId: req.issuerId, signingKeyId: parsed.kid, result: 'ACTIVE', requestId: req.requestId }, client);
+    await client.query('COMMIT');
+    return res.status(201).json({ ok: true, issuerId: req.issuerId, key: inserted.rows[0], retiredKids: retired.rows.map((key) => key.kid), timestamp: now() });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (String(error.code) === '23505') return sendError(res, 409, 'SIGNING_KEY_CONFLICT', 'The replacement signing key is already registered');
+    console.error('Signing key rotation failed:', error);
+    return sendError(res, 500, 'SIGNING_KEY_ROTATION_FAILED', 'Unable to rotate signing key');
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/v1/issuer/signing-keys/:kid/status', issuerMutationRateLimiter, requireWriteAuth, async (req, res) => {
+  if (!requireDatabase(res)) return;
+  const kid = String(req.params.kid || '').trim();
+  const status = String(req.body?.status || '').trim().toLowerCase();
+  if (!kid || !['retired', 'revoked', 'compromised'].includes(status)) {
+    return sendError(res, 422, 'INVALID_SIGNING_KEY_STATUS', 'status must be retired, revoked, or compromised');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `UPDATE qr_signing_keys
+          SET status=$3,
+              retired_at=CASE WHEN $3='retired' THEN COALESCE(retired_at,NOW()) ELSE retired_at END,
+              revoked_at=CASE WHEN $3='revoked' THEN COALESCE(revoked_at,NOW()) ELSE revoked_at END,
+              compromised_at=CASE WHEN $3='compromised' THEN COALESCE(compromised_at,NOW()) ELSE compromised_at END,
+              updated_at=NOW()
+        WHERE issuer_id=$1 AND kid=$2
+        RETURNING kid, algorithm, status, valid_from, retired_at, revoked_at, compromised_at, updated_at`,
+      [req.issuerId, kid, status],
+    );
+    if (!result.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, status: 'NOT_FOUND', kid, timestamp: now() });
+    }
+    await audit(kid, `signing_key_${status}`, { issuerId: req.issuerId, signingKeyId: kid, result: status.toUpperCase(), requestId: req.requestId }, client);
+    await client.query('COMMIT');
+    return res.json({ ok: true, issuerId: req.issuerId, key: result.rows[0], timestamp: now() });
+  } catch (_error) {
+    await client.query('ROLLBACK').catch(() => {});
+    return sendError(res, 500, 'SIGNING_KEY_STATUS_FAILED', 'Unable to update signing key status');
+  } finally {
+    client.release();
   }
 });
 
@@ -450,11 +660,6 @@ app.post('/api/v1/registry/create', issuerMutationRateLimiter, requireWriteAuth,
       ...(contact ? { contact } : {}),
     };
     const hash = hashPayload(payload);
-    const signature = signHash(hash);
-    if (REQUIRE_SIGNATURES && !signature) {
-      await client.query('ROLLBACK');
-      return sendError(res, 503, 'SIGNING_UNAVAILABLE', 'Record signing is required but the signing key is unavailable');
-    }
 
     const issuerResult = await client.query(
       `INSERT INTO qr_issuers (issuer_id, issuer_name, status)
@@ -468,11 +673,19 @@ app.post('/api/v1/registry/create', issuerMutationRateLimiter, requireWriteAuth,
       await client.query('ROLLBACK');
       return sendError(res, 403, 'ISSUER_INACTIVE', 'Issuer is not active');
     }
+    let signed;
+    try {
+      signed = await signHashForIssuer(client, req.issuerId, hash);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      return sendError(res, 503, 'SIGNING_UNAVAILABLE', error.message);
+    }
+    const { signature, key } = signed;
     await client.query(
       `INSERT INTO qr_objects
-       (qrvid, record_type, issuer_id, issuer, owner, title, description, payload, hash, signature, signature_algorithm, status, visibility, issued_at, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ed25519','active',$11,$12,$13)`,
-      [qrvid, recordType, req.issuerId, issuer, subject || null, title, descriptionInput.value || null, payload, hash, signature, payload.visibility, issuedAt, expiresAt]
+       (qrvid, record_type, issuer_id, issuer, owner, title, description, payload, hash, signature, signature_algorithm, signing_key_id, status, visibility, issued_at, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ed25519',$11,'active',$12,$13,$14)`,
+      [qrvid, recordType, req.issuerId, issuer, subject || null, title, descriptionInput.value || null, payload, hash, signature, key?.kid || null, payload.visibility, issuedAt, expiresAt]
     );
     await client.query(
       `INSERT INTO qr_hash_registry (qrvid, hash, algorithm) VALUES ($1,$2,'sha256') ON CONFLICT DO NOTHING`,
@@ -485,9 +698,9 @@ app.post('/api/v1/registry/create', issuerMutationRateLimiter, requireWriteAuth,
         [qrvid, req.issuerId, subject || '', title, issuer, issuedAt, expiresAt, metadata]
       );
     }
-    await audit(qrvid, 'registry_create', { issuerId: req.issuerId, issuer, recordType, result: 'CREATED', requestId: req.requestId }, client);
+    await audit(qrvid, 'registry_create', { issuerId: req.issuerId, issuer, recordType, signingKeyId: key?.kid || null, result: 'CREATED', requestId: req.requestId }, client);
     await client.query('COMMIT');
-    return res.status(201).json({ ok: true, status: 'CREATED', verificationStatus: 'VERIFIED', qrvid, hash, signature: signature ? 'present' : null, verifyUrl: publicVerifyUrl(qrvid), record: payload, timestamp: now() });
+    return res.status(201).json({ ok: true, status: 'CREATED', verificationStatus: 'VERIFIED', qrvid, hash, signature: signature ? 'present' : null, signingKeyId: key?.kid || null, verifyUrl: publicVerifyUrl(qrvid), record: payload, timestamp: now() });
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     if (String(error.code) === '23505') return sendError(res, 409, 'QRVID_CONFLICT', 'QRVID already exists');
@@ -503,19 +716,29 @@ async function getRecord(qrvid) {
   return result.rows[0] || null;
 }
 
-function evaluateRecord(row) {
+async function evaluateRecord(row) {
   let status = mapStatus(row);
   let signatureValid = null;
   let hashValid = null;
+  let signingKeyState = null;
+  let signingKeyStatus = null;
   if (row?.payload) {
     const recalculatedHash = hashPayload(row.payload);
     hashValid = recalculatedHash === row.hash;
-    signatureValid = verifySignature(row.hash, row.signature);
+    const key = row.signing_key_id
+      ? await getSigningKey(pool, row.issuer_id, row.signing_key_id)
+      : null;
+    signingKeyStatus = key?.status || null;
+    const signatureResult = !row.signature && !REQUIRE_SIGNATURES
+      ? { valid: true, keyState: 'NOT_REQUIRED' }
+      : verifyHashWithKey(row.hash, row.signature, key);
+    signatureValid = signatureResult.valid;
+    signingKeyState = signatureResult.keyState;
     if (!hashValid || !signatureValid) status = 'INVALID_SIGNATURE';
   } else {
     status = 'INVALID_SIGNATURE';
   }
-  return { status, hashValid, signatureValid };
+  return { status, hashValid, signatureValid, signingKeyState, signingKeyStatus };
 }
 
 app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
@@ -530,7 +753,7 @@ app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
       return res.status(404).json({ ok: false, verified: false, status: 'NOT_FOUND', qrvid, verifyUrl: publicVerifyUrl(qrvid), timestamp: now() });
     }
 
-    const { status, hashValid, signatureValid } = evaluateRecord(row);
+    const { status, hashValid, signatureValid, signingKeyState, signingKeyStatus } = await evaluateRecord(row);
     const verified = status === 'VERIFIED';
     await audit(qrvid, 'registry_verify', { issuerId: row.issuer_id, result: status, verified, requestId: req.requestId }).catch(() => {});
 
@@ -538,7 +761,7 @@ app.get('/api/v1/verify/:qrvid', publicRateLimiter, async (req, res) => {
       ok: verified,
       verified,
       verificationState: status,
-      ...publicVerificationRecord(row, status, { hashValid, signatureValid }),
+      ...publicVerificationRecord(row, status, { hashValid, signatureValid, signingKeyState, signingKeyStatus }),
       timestamp: now(),
     });
   } catch (error) {
@@ -556,7 +779,7 @@ app.get('/api/v1/vcards/:qrvid.vcf', publicRateLimiter, async (req, res) => {
     if (!row || row.record_type !== 'VCARD') {
       return sendError(res, 404, 'VCARD_NOT_FOUND', 'Verified Contact Card was not found');
     }
-    const { status, hashValid, signatureValid } = evaluateRecord(row);
+    const { status, hashValid, signatureValid, signingKeyState, signingKeyStatus } = await evaluateRecord(row);
     if (status !== 'VERIFIED') {
       await audit(qrvid, 'vcard_download', { issuerId: row.issuer_id, result: status }).catch(() => {});
       return sendError(res, status === 'REVOKED' || status === 'EXPIRED' ? 410 : 409, status, 'Verified Contact Card is not active');
@@ -631,15 +854,18 @@ app.post('/api/v1/issuer/vcards/:qrvid/update', issuerMutationRateLimiter, requi
       updatedAt: now(),
     };
     const hash = hashPayload(updatedPayload);
-    const signature = signHash(hash);
-    if (REQUIRE_SIGNATURES && !signature) {
+    let signed;
+    try {
+      signed = await signHashForIssuer(client, req.issuerId, hash);
+    } catch (error) {
       await client.query('ROLLBACK');
-      return sendError(res, 503, 'SIGNING_UNAVAILABLE', 'Record signing is required but the signing key is unavailable');
+      return sendError(res, 503, 'SIGNING_UNAVAILABLE', error.message);
     }
+    const { signature, key } = signed;
     await client.query(
       `UPDATE qr_objects SET owner=$1, title=$2, description=$3, payload=$4, hash=$5,
-        signature=$6, visibility=$7, updated_at=NOW() WHERE qrvid=$8 AND issuer_id=$9`,
-      [subject, title, updatedPayload.description, updatedPayload, hash, signature, visibility, qrvid, req.issuerId],
+        signature=$6, signing_key_id=$7, visibility=$8, updated_at=NOW() WHERE qrvid=$9 AND issuer_id=$10`,
+      [subject, title, updatedPayload.description, updatedPayload, hash, signature, key?.kid || null, visibility, qrvid, req.issuerId],
     );
     await client.query(
       `INSERT INTO qr_hash_registry (qrvid, hash, algorithm) VALUES ($1,$2,'sha256') ON CONFLICT DO NOTHING`,
@@ -647,6 +873,7 @@ app.post('/api/v1/issuer/vcards/:qrvid/update', issuerMutationRateLimiter, requi
     );
     await audit(qrvid, 'vcard_update', {
       issuerId: req.issuerId,
+      signingKeyId: key?.kid || null,
       result: 'UPDATED',
       requestId: req.requestId,
     }, client);
@@ -657,6 +884,7 @@ app.post('/api/v1/issuer/vcards/:qrvid/update', issuerMutationRateLimiter, requi
       verificationStatus: 'VERIFIED',
       qrvid,
       hash,
+      signingKeyId: key?.kid || null,
       verifyUrl: publicVerifyUrl(qrvid),
       vcardUrl: `${PUBLIC_BASE_URL}/vcard/${encodeURIComponent(qrvid)}.vcf`,
       timestamp: now(),
@@ -736,20 +964,20 @@ app.post('/api/v1/issuer/vcards/bulk', issuerMutationRateLimiter, requireWriteAu
         contact: card.contact,
       };
       const hash = hashPayload(payload);
-      const signature = signHash(hash);
-      if (REQUIRE_SIGNATURES && !signature) throw new Error('SIGNING_UNAVAILABLE');
+      const { signature, key } = await signHashForIssuer(client, req.issuerId, hash);
       await client.query(
         `INSERT INTO qr_objects
          (qrvid, record_type, issuer_id, issuer, owner, title, description, payload, hash, signature,
-          signature_algorithm, status, visibility, issued_at, expires_at)
-         VALUES ($1,'VCARD',$2,$3,$4,$5,$6,$7,$8,$9,'ed25519','active',$10,$11,$12)`,
-        [qrvid, req.issuerId, issuer, subject, title, payload.description, payload, hash, signature, card.visibility, card.issuedAt, card.expiresAt],
+          signature_algorithm, signing_key_id, status, visibility, issued_at, expires_at)
+         VALUES ($1,'VCARD',$2,$3,$4,$5,$6,$7,$8,$9,'ed25519',$10,'active',$11,$12,$13)`,
+        [qrvid, req.issuerId, issuer, subject, title, payload.description, payload, hash, signature, key?.kid || null, card.visibility, card.issuedAt, card.expiresAt],
       );
       await client.query(`INSERT INTO qr_hash_registry (qrvid, hash, algorithm) VALUES ($1,$2,'sha256')`, [qrvid, hash]);
       await audit(qrvid, 'registry_create', {
         issuerId: req.issuerId,
         issuer,
         recordType: 'VCARD',
+        signingKeyId: key?.kid || null,
         result: 'CREATED',
         bulk: true,
         requestId: req.requestId,
@@ -757,6 +985,7 @@ app.post('/api/v1/issuer/vcards/bulk', issuerMutationRateLimiter, requireWriteAu
       created.push({
         qrvid,
         hash,
+        signingKeyId: key?.kid || null,
         verifyUrl: publicVerifyUrl(qrvid),
         vcardUrl: `${PUBLIC_BASE_URL}/vcard/${encodeURIComponent(qrvid)}.vcf`,
       });
@@ -766,7 +995,8 @@ app.post('/api/v1/issuer/vcards/bulk', issuerMutationRateLimiter, requireWriteAu
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Bulk vCard create failed:', error);
-    return sendError(res, error.message === 'SIGNING_UNAVAILABLE' ? 503 : 500, error.message === 'SIGNING_UNAVAILABLE' ? 'SIGNING_UNAVAILABLE' : 'BULK_CREATE_FAILED', 'Unable to create Verified Contact Cards');
+    const signingFailure = String(error?.code || '').startsWith('SIGNING_') || error?.message === 'SIGNING_UNAVAILABLE';
+    return sendError(res, signingFailure ? 503 : 500, signingFailure ? 'SIGNING_UNAVAILABLE' : 'BULK_CREATE_FAILED', signingFailure ? error.message : 'Unable to create Verified Contact Cards');
   } finally {
     client.release();
   }

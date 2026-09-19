@@ -19,11 +19,14 @@ const requiredRoutes = [
   '/api/v1/registry/:qrvid/audit',
   '/api/v1/issuer/records',
   '/api/v1/issuer/analytics',
+  '/api/v1/issuer/signing-keys',
+  '/api/v1/issuer/signing-keys/rotate',
+  '/api/v1/issuer/signing-keys/:kid/status',
 ];
 
 for (const route of requiredRoutes) {
   assert.ok(files.server.includes(route), `server route missing: ${route}`);
-  const openApiRoute = route.replaceAll(':qrvid', '{qrvid}');
+  const openApiRoute = route.replace(/:([A-Za-z0-9_]+)/g, '{$1}');
   assert.ok(files.api.includes(openApiRoute), `OpenAPI path missing: ${openApiRoute}`);
 }
 
@@ -39,6 +42,7 @@ assert.equal(schemaFromServer, schemaFromMigration, 'server and migration schema
 for (const key of [
   'DATABASE_URL', 'QRV_WRITE_API_KEY', 'QRV_DEFAULT_ISSUER_ID', 'REQUIRE_SIGNATURES',
   'SIGNING_PRIVATE_KEY', 'SIGNING_PUBLIC_KEY', 'CORS_ALLOWED_ORIGINS',
+  'SIGNING_KEY_ID',
   'RATE_LIMIT_MAX', 'ISSUER_RATE_LIMIT_MAX', 'ISSUER_READ_RATE_LIMIT_MAX',
 ]) {
   assert.match(files.env, new RegExp(`^${key}=`, 'm'), `.env.example is missing ${key}`);

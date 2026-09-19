@@ -254,6 +254,123 @@ paths:
                   revoked: { type: integer, minimum: 0 }
                   expired: { type: integer, minimum: 0 }
                   timestamp: { type: string, format: date-time }
+  /api/v1/issuer/signing-keys:
+    get:
+      tags: [Issuer]
+      operationId: listIssuerSigningKeys
+      security:
+        - writeApiKey: []
+          issuerId: []
+      responses:
+        '200':
+          description: Issuer-scoped public signing-key metadata. Private key material is never returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, issuerId, keys, timestamp]
+                properties:
+                  ok: { const: true }
+                  issuerId: { type: string }
+                  keys:
+                    type: array
+                    items: { $ref: '#/components/schemas/SigningKey' }
+                  timestamp: { type: string, format: date-time }
+    post:
+      tags: [Issuer]
+      operationId: registerIssuerSigningKey
+      security:
+        - writeApiKey: []
+          issuerId: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterSigningKeyRequest' }
+      responses:
+        '201':
+          description: Public Ed25519 key registered and activated for the issuer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SigningKeyResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Signing key conflict.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+  /api/v1/issuer/signing-keys/rotate:
+    post:
+      tags: [Issuer]
+      operationId: rotateIssuerSigningKey
+      security:
+        - writeApiKey: []
+          issuerId: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterSigningKeyRequest' }
+      responses:
+        '201':
+          description: New key activated and prior active keys retired transactionally.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, issuerId, key, retiredKids, timestamp]
+                properties:
+                  ok: { const: true }
+                  issuerId: { type: string }
+                  key: { $ref: '#/components/schemas/SigningKey' }
+                  retiredKids: { type: array, items: { type: string } }
+                  timestamp: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Signing key conflict.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+  /api/v1/issuer/signing-keys/{kid}/status:
+    post:
+      tags: [Issuer]
+      operationId: changeIssuerSigningKeyStatus
+      security:
+        - writeApiKey: []
+          issuerId: []
+      parameters:
+        - name: kid
+          in: path
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 255 }
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [retired, revoked, compromised] }
+      responses:
+        '200':
+          description: Key status changed and lifecycle event audited.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SigningKeyResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Signing key was not found. }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
 components:
   securitySchemes:
     writeApiKey:
@@ -306,13 +423,19 @@ components:
         schemaVersion: { type: string }
         signaturesRequired: { type: boolean }
         signingKeyPairValid: { type: [boolean, 'null'] }
+        signingKeyId: { type: [string, 'null'] }
         timestamp: { type: string, format: date-time }
     Integrity:
       type: object
       required: [hashValid, signatureValid]
       properties:
+        hashAlgorithm: { const: SHA-256 }
+        signatureAlgorithm: { type: [string, 'null'], enum: [Ed25519, null] }
         hashValid: { type: boolean }
         signatureValid: { type: boolean }
+        signingKeyId: { type: [string, 'null'] }
+        signingKeyState: { type: [string, 'null'] }
+        signingKeyStatus: { type: [string, 'null'], enum: [active, retired, revoked, compromised, null] }
     VerificationResult:
       type: object
       required: [ok, verified, verificationState, status, qrvid, issuer, recordType, integrity, verifyUrl, timestamp]
@@ -364,7 +487,7 @@ components:
         contact: { type: object }
     CreateRecordResponse:
       type: object
-      required: [ok, status, verificationStatus, qrvid, hash, verifyUrl, record, timestamp]
+      required: [ok, status, verificationStatus, qrvid, hash, signingKeyId, verifyUrl, record, timestamp]
       properties:
         ok: { const: true }
         status: { const: CREATED }
@@ -372,6 +495,7 @@ components:
         qrvid: { $ref: '#/components/schemas/Qrvid' }
         hash: { type: string, pattern: '^[a-f0-9]{64}$' }
         signature: { enum: [present, null] }
+        signingKeyId: { type: [string, 'null'] }
         verifyUrl: { type: string, format: uri }
         record: { type: object }
         timestamp: { type: string, format: date-time }
@@ -386,6 +510,36 @@ components:
         title: { type: [string, 'null'] }
         status: { type: string }
         visibility: { enum: [public, restricted, private] }
+    SigningKey:
+      type: object
+      required: [kid, algorithm, status, valid_from, created_at]
+      properties:
+        kid: { type: string, minLength: 8, maxLength: 255 }
+        algorithm: { const: ed25519 }
+        status: { type: string, enum: [active, retired, revoked, compromised] }
+        valid_from: { type: string, format: date-time }
+        retired_at: { type: [string, 'null'], format: date-time }
+        revoked_at: { type: [string, 'null'], format: date-time }
+        compromised_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    RegisterSigningKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [publicKey]
+      properties:
+        kid: { type: string, minLength: 8, maxLength: 255 }
+        publicKey: { type: string, minLength: 32, maxLength: 4096 }
+        issuerName: { type: string, maxLength: 255 }
+        metadata: { type: object, maxProperties: 32 }
+    SigningKeyResponse:
+      type: object
+      required: [ok, issuerId, key, timestamp]
+      properties:
+        ok: { const: true }
+        issuerId: { type: string }
+        key: { $ref: '#/components/schemas/SigningKey' }
+        timestamp: { type: string, format: date-time }
     RegistryRecordResponse:
       type: object
       required: [ok, status, record, timestamp]
