@@ -3,7 +3,7 @@ import pkg from 'pg';
 
 dotenv.config();
 const { Pool } = pkg;
-const SCHEMA_VERSION = '2026-08-15-production-v5';
+const SCHEMA_VERSION = '2026-09-05-production-v6';
 
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is required');
@@ -43,6 +43,33 @@ INSERT INTO qr_issuers (issuer_id, issuer_name, status)
 VALUES ('legacy-unassigned', 'Legacy Unassigned Issuer', 'suspended')
 ON CONFLICT (issuer_id) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS qr_signing_keys (
+  id BIGSERIAL PRIMARY KEY,
+  issuer_id VARCHAR(120) NOT NULL REFERENCES qr_issuers(issuer_id),
+  kid VARCHAR(160) NOT NULL,
+  algorithm VARCHAR(40) NOT NULL DEFAULT 'ed25519',
+  public_key TEXT NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  retired_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  compromised_at TIMESTAMPTZ,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_qr_signing_keys_issuer_kid UNIQUE (issuer_id, kid),
+  CONSTRAINT ck_qr_signing_keys_algorithm CHECK (LOWER(algorithm) = 'ed25519'),
+  CONSTRAINT ck_qr_signing_keys_status CHECK (LOWER(status) IN ('active','retired','revoked','compromised'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_qr_signing_keys_one_active_per_issuer
+  ON qr_signing_keys(issuer_id)
+  WHERE LOWER(status) = 'active';
+CREATE INDEX IF NOT EXISTS idx_qr_signing_keys_issuer_status
+  ON qr_signing_keys(issuer_id, status);
+CREATE INDEX IF NOT EXISTS idx_qr_signing_keys_kid
+  ON qr_signing_keys(kid);
+
 CREATE TABLE IF NOT EXISTS qr_objects (
   id BIGSERIAL PRIMARY KEY,
   qrvid VARCHAR(160) UNIQUE NOT NULL,
@@ -56,6 +83,7 @@ CREATE TABLE IF NOT EXISTS qr_objects (
   hash TEXT NOT NULL,
   signature TEXT,
   signature_algorithm VARCHAR(40) NOT NULL DEFAULT 'ed25519',
+  signing_key_id VARCHAR(160),
   status VARCHAR(40) NOT NULL DEFAULT 'active',
   visibility VARCHAR(32) NOT NULL DEFAULT 'public',
   issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -72,6 +100,7 @@ ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS description TEXT;
 ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS payload JSONB;
 ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS signature TEXT;
 ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS signature_algorithm VARCHAR(40) NOT NULL DEFAULT 'ed25519';
+ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS signing_key_id VARCHAR(160);
 ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS visibility VARCHAR(32) NOT NULL DEFAULT 'public';
 ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS issued_at TIMESTAMPTZ DEFAULT NOW();
 ALTER TABLE qr_objects ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
@@ -82,6 +111,19 @@ UPDATE qr_objects SET visibility='private' WHERE LOWER(COALESCE(visibility,'')) 
 UPDATE qr_objects
 SET visibility='private', status='invalid', updated_at=NOW()
 WHERE payload IS NULL AND issuer_id='legacy-unassigned';
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'fk_qr_objects_signing_key'
+  ) THEN
+    ALTER TABLE qr_objects
+      ADD CONSTRAINT fk_qr_objects_signing_key
+      FOREIGN KEY (issuer_id, signing_key_id)
+      REFERENCES qr_signing_keys(issuer_id, kid)
+      NOT VALID;
+  END IF;
+END $$;
 
 DO $$
 DECLARE
@@ -146,6 +188,7 @@ ALTER TABLE qr_certificates ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEF
 CREATE INDEX IF NOT EXISTS idx_qr_objects_status ON qr_objects(status);
 CREATE INDEX IF NOT EXISTS idx_qr_objects_hash ON qr_objects(hash);
 CREATE INDEX IF NOT EXISTS idx_qr_objects_issuer_id ON qr_objects(issuer_id);
+CREATE INDEX IF NOT EXISTS idx_qr_objects_signing_key_id ON qr_objects(signing_key_id);
 CREATE INDEX IF NOT EXISTS idx_qr_objects_expires_at ON qr_objects(expires_at);
 CREATE INDEX IF NOT EXISTS idx_qr_objects_record_type ON qr_objects(record_type);
 CREATE INDEX IF NOT EXISTS idx_qr_audit_qrvid ON qr_audit_log(qrvid);
@@ -158,7 +201,7 @@ CREATE INDEX IF NOT EXISTS idx_qr_certificates_issuer_id ON qr_certificates(issu
 DROP VIEW IF EXISTS registry_records;
 CREATE VIEW registry_records AS
 SELECT qrvid, record_type AS "recordType", issuer_id AS "issuerId", issuer, owner,
-  title, hash, signature, visibility,
+  title, hash, signature, signature_algorithm AS "signatureAlgorithm", signing_key_id AS "signingKeyId", visibility,
   CASE
     WHEN revoked_at IS NOT NULL OR LOWER(COALESCE(status,''))='revoked' THEN 'revoked'
     WHEN expires_at IS NOT NULL AND expires_at <= NOW() THEN 'expired'
