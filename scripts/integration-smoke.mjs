@@ -10,8 +10,27 @@ const base = `http://127.0.0.1:${port}`;
 const apiKey = 'integration-write-key-with-fixed-length';
 const issuerId = 'integration-issuer';
 const otherIssuerId = 'integration-other-issuer';
-const schemaVersion = '2026-08-15-production-v5';
+const schemaVersion = '2026-09-05-production-v6';
 const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+const keyId = `ed25519-${crypto.createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex').slice(0, 24)}`;
+const database = new Pool({ connectionString: process.env.DATABASE_URL, ssl: false });
+
+await database.query('BEGIN');
+await database.query("UPDATE qr_signing_keys SET status='retired', retired_at=COALESCE(retired_at,NOW()), updated_at=NOW() WHERE issuer_id=$1 AND status='active'", [issuerId]);
+await database.query(
+  `INSERT INTO qr_issuers (issuer_id, issuer_name, status) VALUES ($1,$2,'active')
+   ON CONFLICT (issuer_id) DO UPDATE SET issuer_name=EXCLUDED.issuer_name, status='active', updated_at=NOW()`,
+  [issuerId, 'Integration Issuer'],
+);
+await database.query(
+  `INSERT INTO qr_signing_keys (issuer_id, kid, algorithm, public_key, status)
+   VALUES ($1,$2,'ed25519',$3,'active')`,
+  [issuerId, keyId, publicPem],
+);
+await database.query('COMMIT');
+
 const child = spawn(process.execPath, ['server.js'], {
   stdio: ['ignore', 'inherit', 'inherit'],
   env: {
@@ -22,8 +41,9 @@ const child = spawn(process.execPath, ['server.js'], {
     REQUIRE_SIGNATURES: 'true',
     QRV_WRITE_API_KEY: apiKey,
     QRV_DEFAULT_ISSUER_ID: issuerId,
-    SIGNING_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
-    SIGNING_PUBLIC_KEY: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+    SIGNING_KEY_ID: keyId,
+    SIGNING_PRIVATE_KEY: privatePem,
+    SIGNING_PUBLIC_KEY: publicPem,
     CORS_ALLOWED_ORIGINS: 'https://qrv.network',
   },
 });
@@ -47,8 +67,6 @@ async function waitReady() {
 
 const authHeaders = { 'content-type': 'application/json', 'x-api-key': apiKey, 'x-issuer-id': issuerId };
 const otherIssuerHeaders = { ...authHeaders, 'x-issuer-id': otherIssuerId };
-const database = new Pool({ connectionString: process.env.DATABASE_URL, ssl: false });
-
 try {
   await waitReady();
   const health = await json('/healthz');
@@ -58,6 +76,7 @@ try {
   assert.equal(ready.response.status, 200);
   assert.equal(ready.body.schemaVersion, schemaVersion);
   assert.equal(ready.body.signingKeyPairValid, true);
+  assert.equal(ready.body.signingKeyId, keyId);
 
   const invalid = await json('/api/v1/registry/create', { method: 'POST', headers: { ...authHeaders, 'x-api-key': 'wrong-length' }, body: '{}' });
   assert.equal(invalid.response.status, 401);
@@ -82,9 +101,14 @@ try {
   });
   assert.equal(created.response.status, 201);
   assert.match(created.body.qrvid, /^QRV-/);
+  assert.equal(created.body.signingKeyId, keyId);
 
   const verified = await json(`/api/v1/verify/${encodeURIComponent(created.body.qrvid)}`);
   assert.equal(verified.body.verificationState, 'VERIFIED');
+  assert.equal(verified.body.integrity.hashValid, true);
+  assert.equal(verified.body.integrity.signatureValid, true);
+  assert.equal(verified.body.integrity.signingKeyId, keyId);
+  assert.equal(verified.body.integrity.signingKeyStatus, 'active');
 
   const revoked = await json(`/api/v1/registry/${encodeURIComponent(created.body.qrvid)}/revoke`, {
     method: 'POST', headers: authHeaders, body: JSON.stringify({ reason: 'Integration test' }),
@@ -92,6 +116,13 @@ try {
   assert.equal(revoked.body.status, 'REVOKED');
   const verifiedAfterRevoke = await json(`/api/v1/verify/${encodeURIComponent(created.body.qrvid)}`);
   assert.equal(verifiedAfterRevoke.body.verificationState, 'REVOKED');
+  assert.equal(verifiedAfterRevoke.body.qrvid, created.body.qrvid);
+
+  const persisted = await database.query('SELECT qrvid, status, signing_key_id FROM qr_objects WHERE qrvid=$1', [created.body.qrvid]);
+  assert.equal(persisted.rows.length, 1);
+  assert.equal(persisted.rows[0].qrvid, created.body.qrvid);
+  assert.equal(persisted.rows[0].status, 'revoked');
+  assert.equal(persisted.rows[0].signing_key_id, keyId);
 
   const issuerIsolation = await json(`/api/v1/registry/${encodeURIComponent(created.body.qrvid)}/revoke`, {
     method: 'POST', headers: otherIssuerHeaders, body: JSON.stringify({ reason: 'Must not cross issuer boundary' }),
