@@ -12,6 +12,6 @@ QR-V record integrity uses SHA-256 over canonical JSON and Ed25519 signatures. T
 
 ## Rotation gate
 
-The current schema stores signatures but not a public `kid`-based trust chain. Therefore a routine signing-key rotation must not occur silently: replacing the verification public key can make historical records fail integrity checks. Before the first rotation, implement and test key identifiers, retained historical public keys, record-to-key binding, compromise revocation, and a migration for existing signed records.
+Schema `2026-09-05-production-v6` stores an issuer-scoped `kid`, retained public keys, and the record-to-key binding in PostgreSQL. A routine rotation must use the signing-key registry API: activate the replacement key, retire the previous active key, confirm historical records verify with the retired key, and confirm new records carry the replacement `kid`.
 
-Until that work is complete, an emergency compromise response must prioritize stopping issuance, preserving evidence, revoking the affected deployment credential, and executing a reviewed data and trust migration. Do not convert unverifiable historical records to VERIFIED.
+If a key is revoked or compromised, stop issuance with it immediately. The verifier fails closed for records bound to that key; do not convert unverifiable historical records to `VERIFIED`. Preserve the audit trail and execute the approved incident and replacement-key procedure.
