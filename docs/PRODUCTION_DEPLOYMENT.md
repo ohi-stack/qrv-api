@@ -10,7 +10,7 @@ Do not merge or route production traffic until all of the following are true:
 2. PostgreSQL has a verified, restorable backup;
 3. `api.qrv.network` is assigned to this application rather than the issuer interface;
 4. production environment values are installed through the host's secret manager;
-5. migration `2026-08-15-production-v5` is applied;
+5. migration `2026-09-05-production-v6` is applied and the issuer's public Ed25519 key is registered in `qr_signing_keys`;
 6. `/healthz`, `/readyz`, and the guarded live acceptance command pass.
 
 ## Required runtime
@@ -47,6 +47,7 @@ QRV_DEFAULT_ISSUER_ID=<approved default issuer identifier>
 REQUIRE_SIGNATURES=true
 SIGNING_PRIVATE_KEY=<Ed25519 private key PEM>
 SIGNING_PUBLIC_KEY=<matching Ed25519 public key PEM>
+SIGNING_KEY_ID=<kid derived from the registered public key>
 
 CORS_ALLOWED_ORIGINS=https://qrv.network
 RATE_LIMIT_WINDOW_MS=60000
@@ -71,8 +72,9 @@ When the hosting panel cannot preserve multiline PEM values, store base64-encode
 8. Confirm `GET /healthz` returns HTTP 200 JSON from service `qrv-api` without a redirect.
 9. Confirm `GET /readyz` returns HTTP 200 with:
    - `ready: true`;
-   - `schemaVersion: 2026-08-15-production-v5`;
-   - `signingKeyPairValid: true`.
+   - `schemaVersion: 2026-09-05-production-v6`;
+   - `signingKeyPairValid: true`;
+   - a non-empty `signingKeyId` matching the registered active key.
 10. Run the live acceptance gate below.
 
 ## Guarded live acceptance
@@ -104,3 +106,17 @@ Do not point `api.qrv.network` back to the issuer application as a steady state.
 ## Downstream release
 
 Only after this API gate passes may `qrv-node` be merged and deployed. Legacy browser hostnames must then be converted to the documented 308 compatibility redirects before their application deployments are retired.
+
+## Key bootstrap and rotation
+
+For a new issuer, register the public key once before starting the API with signatures required:
+
+```bash
+curl -fsS -X POST "$QRV_ACCEPTANCE_BASE_URL/api/v1/issuer/signing-keys" \
+  -H "X-API-Key: $QRV_WRITE_API_KEY" \
+  -H "X-Issuer-ID: $QRV_ACCEPTANCE_ISSUER_ID" \
+  -H 'Content-Type: application/json' \
+  --data '{"publicKey":"<Ed25519 public PEM>"}'
+```
+
+The private key stays in the API secret manager. Set `SIGNING_KEY_ID` to the returned `kid`; `/readyz` must bind that `kid` to the active database key before issuance is considered ready. Use the rotate endpoint for replacement keys so retirement and activation are audited in one transaction. Never update the database key row manually without an incident record and a matching audit event.
