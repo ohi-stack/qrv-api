@@ -1,0 +1,259 @@
+{
+  "network": "QR-V Global Verification Network",
+  "protocol": "QRVP-1",
+  "standard": "QVS-1.0",
+  "owner": "ONEGODIAN, LLC",
+  "rootDomain": "qrv.network",
+  "architecture": "two-node-consolidated",
+  "architectureVersion": "1.0",
+  "runtimeNodeCount": 2,
+  "canonicalDemoQrvid": "QRV-PROD-CERT-000001",
+  "canonicalVerificationUrl": "https://qrv.network/verify/QRV-PROD-CERT-000001",
+  "canonicalApiBaseUrl": "https://api.qrv.network/api/v1",
+  "statusPage": "https://qrv.network/status",
+  "platformRuntime": {
+    "repository": "ohi-stack/qrv-node",
+    "frontend": "react-vite",
+    "reactMajor": 19,
+    "viteMajor": 6,
+    "serverBoundary": "express",
+    "buildOutput": "dist",
+    "customerFrontendActivated": true,
+    "activationCommit": "ed8831a4a45c061a69400fe5aad75557b9cb9e4b",
+    "sourceReferenceRepository": "ohi-stack/qrv-marketing-site"
+  },
+  "canonicalDatastore": {
+    "preferredType": "supabase-postgres",
+    "supportedTypes": ["supabase-postgres", "postgres"],
+    "authority": "api.qrv.network",
+    "singleWritableAuthorityRequired": true,
+    "supabaseProjectUrlVariable": "SUPABASE_URL",
+    "supabaseServerSecretVariable": "SUPABASE_SECRET_KEY",
+    "postgresConnectionVariable": "DATABASE_URL",
+    "sameProjectRequirement": "When supabase-postgres is selected, DATABASE_URL must point to the PostgreSQL database belonging to the same project named by SUPABASE_URL.",
+    "competingWritableRegistriesForbidden": true
+  },
+  "securityBoundary": {
+    "publicPlatform": "qrv.network",
+    "trustedBackend": "api.qrv.network",
+    "browserMayReceiveDatabaseCredentials": false,
+    "browserMayReceiveSupabaseSecretKey": false,
+    "browserMayReceiveSigningPrivateKeys": false,
+    "browserMayReceiveWebhookSecrets": false,
+    "browserMayReceivePrivilegedApiKeys": false,
+    "canonicalServerApiKey": "QRV_API_KEY",
+    "compatibilityServerApiKey": "QRV_PLATFORM_API_KEY",
+    "databaseCredentialsAllowedOnlyOnApiNode": true
+  },
+  "environmentContracts": {
+    "platform": {
+      "serverRequiredOrExpected": [
+        "NODE_ENV",
+        "PORT",
+        "APP_VERSION",
+        "APP_BASE_URL",
+        "QRV_PLATFORM_ORIGIN",
+        "API_BASE_URL",
+        "QRV_API_BASE_URL",
+        "VERIFY_BASE_URL",
+        "REGISTRY_BASE_URL",
+        "ISSUER_BASE_URL",
+        "DOCS_BASE_URL",
+        "DEVELOPERS_BASE_URL",
+        "STATUS_BASE_URL",
+        "QRV_PLATFORM_API_KEY",
+        "SESSION_SECRET",
+        "ISSUER_ACCESS_CODE",
+        "SESSION_TTL_MS",
+        "LOG_LEVEL"
+      ],
+      "browserSafeViteVariables": [
+        "VITE_APP_BASE_URL",
+        "VITE_QRV_API_BASE_URL",
+        "VITE_QRV_VERIFY_BASE_URL",
+        "VITE_QRV_REGISTRY_BASE_URL",
+        "VITE_QRV_ISSUER_BASE_URL",
+        "VITE_QRV_DOCS_BASE_URL",
+        "VITE_QRV_DEVELOPERS_BASE_URL",
+        "VITE_QRV_STATUS_BASE_URL",
+        "VITE_QRV_DEMO_QRVID"
+      ],
+      "forbiddenSecretClasses": [
+        "DATABASE_URL",
+        "SUPABASE_SECRET_KEY",
+        "QRV_SIGNING_PRIVATE_KEY",
+        "QRV_WEBHOOK_SECRET",
+        "database-admin-credentials",
+        "payment-provider-secrets"
+      ],
+      "viteSecretRule": "No privileged credential or secret may use the VITE_ prefix."
+    },
+    "api": {
+      "requiredOrExpected": [
+        "NODE_ENV",
+        "PORT",
+        "APP_VERSION",
+        "QRV_API_BASE_URL",
+        "QRV_PUBLIC_BASE_URL",
+        "QRV_PLATFORM_ORIGIN",
+        "QRV_VERIFY_BASE_URL",
+        "QRV_REGISTRY_BASE_URL",
+        "QRV_DATA_BACKEND",
+        "SUPABASE_URL",
+        "SUPABASE_SECRET_KEY",
+        "DATABASE_URL",
+        "DATABASE_POOL_MAX",
+        "PG_CONNECTION_TIMEOUT_MS",
+        "PG_IDLE_TIMEOUT_MS",
+        "PGSSLMODE",
+        "QRV_API_KEY",
+        "QRV_PLATFORM_API_KEY",
+        "QRV_WEBHOOK_SECRET",
+        "CORS_ORIGINS",
+        "CORS_ALLOWED_ORIGINS",
+        "LOG_LEVEL",
+        "PUBLIC_RATE_WINDOW_MS",
+        "PUBLIC_RATE_LIMIT"
+      ],
+      "futureBackendOnly": [
+        "JWT_SECRET",
+        "QRV_SIGNING_PRIVATE_KEY",
+        "QRV_SIGNING_KEY_ID",
+        "QRV_SIGNING_ALGORITHM"
+      ]
+    }
+  },
+  "productionDelivery": {
+    "platformHostname": "qrv.network",
+    "platformRepository": "ohi-stack/qrv-node",
+    "platformFrontend": "react-vite",
+    "platformServerBoundary": "express",
+    "platformBuildOutput": "dist",
+    "apiHostname": "api.qrv.network",
+    "apiRepository": "ohi-stack/qrv-api",
+    "singlePlatformOriginRequired": true,
+    "duplicateRootOriginsForbidden": true,
+    "desktopMobileParityRequired": true,
+    "canonicalHomepageMarker": "QR-V™ NETWORK",
+    "forbiddenLegacyHomepageMarkers": [
+      "Verify Records. Confirm Authenticity. Instantly.",
+      "CERTIFICATES • CREDENTIALS • PRODUCTS • ASSETS • DOCUMENTS • PROPERTY TITLES • FINANCIAL RECORDS"
+    ],
+    "rootHtmlCachePolicy": "no-cache, max-age=0, must-revalidate",
+    "cachePurgeRequiredAfterOriginChange": true
+  },
+  "services": [
+    {
+      "id": "platform",
+      "repository": "ohi-stack/qrv-node",
+      "baseUrl": "https://qrv.network",
+      "role": "public-platform-node",
+      "required": true,
+      "frontend": "react-vite",
+      "serverBoundary": "express",
+      "routes": [
+        "/",
+        "/verify",
+        "/verify/:qrvid",
+        "/issuer",
+        "/issuer/dashboard",
+        "/issuer/records",
+        "/registry",
+        "/explorer",
+        "/docs",
+        "/developers",
+        "/api-reference",
+        "/protocol",
+        "/standards",
+        "/security",
+        "/use-cases",
+        "/pricing",
+        "/store",
+        "/billing",
+        "/wallet",
+        "/admin",
+        "/status",
+        "/about"
+      ],
+      "healthPaths": ["/health", "/healthz", "/readyz", "/version"]
+    },
+    {
+      "id": "api",
+      "repository": "ohi-stack/qrv-api",
+      "baseUrl": "https://api.qrv.network",
+      "apiBaseUrl": "https://api.qrv.network/api/v1",
+      "role": "canonical-api-registry-node",
+      "required": true,
+      "routes": [
+        "/api/v1/verify/:qrvid",
+        "/api/v1/records/:qrvid",
+        "/api/v1/records",
+        "/api/v1/records/:qrvid/revoke",
+        "/api/v1/audit/:qrvid"
+      ],
+      "healthPaths": ["/health", "/healthz", "/readyz", "/version"]
+    }
+  ],
+  "compatibilityApiProxy": {
+    "publicPrefix": "https://qrv.network/api/v1",
+    "authoritativeTarget": "https://api.qrv.network/api/v1",
+    "mode": "proxy-or-redirect-without-backend-duplication"
+  },
+  "legacyAliasMode": "redirect-only-http-308",
+  "legacyAliases": {
+    "verify.qrv.network": "https://qrv.network/verify",
+    "issuer.qrv.network": "https://qrv.network/issuer",
+    "registry.qrv.network": "https://qrv.network/registry",
+    "explorer.qrv.network": "https://qrv.network/explorer",
+    "docs.qrv.network": "https://qrv.network/docs",
+    "developers.qrv.network": "https://qrv.network/developers",
+    "status.qrv.network": "https://qrv.network/status",
+    "store.qrv.network": "https://qrv.network/store",
+    "wallet.qrv.network": "https://qrv.network/wallet",
+    "admin.qrv.network": "https://qrv.network/admin"
+  },
+  "sourceModules": [
+    "ohi-stack/qrv-verify",
+    "ohi-stack/qrv-registry",
+    "ohi-stack/issuer-qrv",
+    "ohi-stack/qrv-docs",
+    "ohi-stack/qrv-developer-portal",
+    "ohi-stack/qrv-explorer",
+    "ohi-stack/qrv-status",
+    "ohi-stack/qrv-marketing-site",
+    "ohi-stack/qrv-billing",
+    "ohi-stack/qrv-admin",
+    "ohi-stack/qrv-wallet"
+  ],
+  "forbiddenProductionRootRepositories": [
+    "ohi-stack/qrv-marketing-site",
+    "ohi-stack/qrv-verify",
+    "ohi-stack/issuer-qrv",
+    "ohi-stack/qrv-registry",
+    "ohi-stack/qrv-explorer"
+  ],
+  "currentDeterministicPublicStatuses": ["VERIFIED", "REVOKED", "EXPIRED", "NOT_FOUND"],
+  "productionTargetStatuses": ["VERIFIED", "REVOKED", "EXPIRED", "NOT_FOUND", "INVALID_FORMAT", "INVALID_SIGNATURE", "SUSPENDED_ISSUER", "UNAVAILABLE"],
+  "cryptography": {
+    "sha256": "active",
+    "ed25519": "required-production-gate",
+    "fullIssuerSignatureValidationMayBeClaimed": false
+  },
+  "productionAcceptance": {
+    "requiredLifecycle": [
+      "issuer-login",
+      "create-record",
+      "generate-qrvid",
+      "generate-qr",
+      "verify-verified",
+      "revoke-record",
+      "verify-revoked",
+      "audit-events-present"
+    ],
+    "overallOperationalClaimRequiresApiAcceptance": true,
+    "overallOperationalClaimRequiresEd25519ForFullCryptographicCompliance": true,
+    "frontendConvergenceComplete": true,
+    "liveHostingerAcceptanceStillRequired": true
+  },
+  "lastUpdated": "2026-09-06"
+}

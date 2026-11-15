@@ -194,3 +194,7 @@ A production release is accepted only when:
 8. missing records return `NOT_FOUND`.
 9. audit events exist for issuance, verification, and revocation.
 10. the configured data authority is singular and traceable to the intended Supabase/PostgreSQL project.
+
+## Repository consolidation
+
+See [source inventory and integration notes](docs/repository-consolidation/README.md).
