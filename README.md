@@ -168,6 +168,23 @@ SHA-256 integrity is active in the current implementation. Ed25519 must not be r
 - Fail-closed writes when API authorization is missing.
 - No backend secrets returned to clients.
 
+## Hostinger MariaDB
+
+On the Express API app for `api.qrv.network`, set `QRV_DATA_BACKEND=mariadb` and a server-side
+`DATABASE_URL=mysql://USER:URL_ENCODED_PASSWORD@127.0.0.1:3306/DATABASE`. Use the credentials for the
+dedicated QR-V registry database. Percent-encode reserved characters in the username and password.
+The adapter validates TLS certificates for remote hosts. All registry operations use one database.
+
+Run `npm run migrate` with the chosen backend configuration. The MariaDB migration creates the five
+registry tables and can be rerun against the same schema. It does not copy existing records.
+For a cutover, rehearse an import from the authoritative PostgreSQL backup, reconcile row counts
+and lifecycle states, and preserve the source and old deployment configuration for rollback.
+Check JSON readiness and confirm verification of existing identifiers before reopening writes.
+
+The MariaDB CI job runs `npm run test:mariadb` against a disposable database named
+`qrv_mariadb_test` on loopback. This includes issue, verify, revoke, expiry, audit and authorization
+checks.
+
 ## Deployment
 
 ```text

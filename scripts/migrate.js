@@ -1,18 +1,15 @@
 import dotenv from 'dotenv';
-import pg from 'pg';
+import { readFile } from 'node:fs/promises';
+import { createDatabase } from '../database.js';
 
 dotenv.config();
-const { Pool } = pg;
 
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is required');
   process.exit(1);
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: false }
-});
+const pool = createDatabase();
 
 const sql = `
 CREATE TABLE IF NOT EXISTS qr_objects (
@@ -87,10 +84,23 @@ CREATE INDEX IF NOT EXISTS idx_qr_certificates_qrvid ON qr_certificates(qrvid);
 `;
 
 try {
-  await pool.query(sql);
+  if (process.env.QRV_DATA_BACKEND === 'mariadb') {
+    const schema = await readFile(new URL('../schema/mariadb.sql', import.meta.url), 'utf8');
+    const connection = await pool.connect();
+    try {
+      // This checked-in schema contains only plain DDL and session statements.
+      for (const statement of schema.split(';').map(value => value.trim()).filter(Boolean)) {
+        await connection.query(statement);
+      }
+    } finally {
+      connection.release();
+    }
+  } else {
+    await pool.query(sql);
+  }
   console.log('QR-V API migration complete');
 } catch (error) {
-  console.error(error);
+  console.error('QR-V API migration failed:', error.code || error.name);
   process.exitCode = 1;
 } finally {
   await pool.end();
