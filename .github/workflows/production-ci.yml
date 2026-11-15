@@ -30,3 +30,31 @@ jobs:
         run: npm run validate:prod
       - name: Dependency audit
         run: npm audit --omit=dev --audit-level=high
+
+  mariadb-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci-root-password
+          MARIADB_DATABASE: qrv_mariadb_test
+          MARIADB_USER: qrv
+          MARIADB_PASSWORD: ci-registry-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --no-audit --no-fund
+      - run: npm run test:mariadb
+        env:
+          QRV_MARIADB_TEST_URL: mysql://qrv:ci-registry-password@127.0.0.1:3306/qrv_mariadb_test

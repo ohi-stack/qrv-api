@@ -7,19 +7,27 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check scripts/migrate.js && node --check scripts/acceptance-live.mjs",
+    "check": "node --check database.js && node --check server.js && node --check scripts/migrate.js && node --check scripts/acceptance-live.mjs && node --check scripts/test-mariadb.mjs",
     "build": "echo Build complete",
     "migrate": "node scripts/migrate.js",
     "acceptance:live": "node scripts/acceptance-live.mjs",
-    "validate:prod": "npm run check && npm run build"
+    "validate:prod": "npm run check && npm run build",
+    "test:mariadb": "node scripts/test-mariadb.mjs"
   },
-  "keywords": ["qrv", "verification", "api", "registry", "qr"],
+  "keywords": [
+    "qrv",
+    "verification",
+    "api",
+    "registry",
+    "qr"
+  ],
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "helmet": "^8.1.0",
+    "mysql2": "^3.24.6",
     "pg": "^8.16.3"
   },
   "engines": {
