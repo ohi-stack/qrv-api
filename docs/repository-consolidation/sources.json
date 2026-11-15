@@ -1,0 +1,73 @@
+[
+  {
+    "repo": "ohi-stack/qrv-docs",
+    "commit": "79659aecb1b76a52327ee8acf3bb65edbe54c982",
+    "artifacts": [
+      {
+        "source": "VERIFICATION_STATUS_CONTRACT.md",
+        "destination": "docs/repository-consolidation/reference/qrv-docs/VERIFICATION_STATUS_CONTRACT.md",
+        "sha256": "cbb6bf46fd58fc253d7009947b9679588aa494e67143de9f35eb0e4b53c2e321"
+      }
+    ],
+    "disposition": "Expected lifecycle semantics. Current API behavior and readiness gaps are documented separately."
+  },
+  {
+    "repo": "ohi-stack/qrv-infra",
+    "commit": "f51823dde04d52b11d2948a508a989c48181ea27",
+    "artifacts": [
+      {
+        "source": "network.manifest.json",
+        "destination": "docs/repository-consolidation/reference/qrv-infra/network.manifest.json",
+        "sha256": "1ca4c9cf5cba823d82be054902d594f30a0a1cc2a814d4eff3b3eb6f8dfb66e3"
+      },
+      {
+        "source": "PRODUCTION_ENVIRONMENT_CONTRACT.md",
+        "destination": "docs/repository-consolidation/reference/qrv-infra/PRODUCTION_ENVIRONMENT_CONTRACT.md",
+        "sha256": "876fb95d952eaf3356187c7f773bbc7661390b795f3aeea68a3451ac8ef46272"
+      }
+    ],
+    "disposition": "Service ownership and environment reference. Runtime configuration remains in the deployment environment."
+  },
+  {
+    "repo": "ohi-stack/qrv-registry",
+    "commit": "144a85413c90e67c818e095a5cb3164b44928174",
+    "artifacts": [],
+    "disposition": "PostgreSQL schema and migrations have one owner. Legacy Redis workers, webhooks and duplicate writers require a separate contract and review."
+  },
+  {
+    "repo": "ohi-stack/qrv-security",
+    "commit": "2ceac90126d81657caf60af26178ea919e96cf27",
+    "artifacts": [
+      {
+        "source": "SECURITY.md",
+        "destination": "docs/repository-consolidation/reference/qrv-security/SECURITY.md",
+        "sha256": "7f4172471ece7e6eb8bc465e91c56b1802996342c2ba9a677a809b618a6f97b5"
+      }
+    ],
+    "disposition": "Security requirements reference. Review evidence is required before claiming controls are operational."
+  },
+  {
+    "repo": "ohi-stack/qrv-status",
+    "commit": "c68808fb661dd6798f4df330f31a501a62207fb3",
+    "artifacts": [
+      {
+        "source": "services.json",
+        "destination": "docs/repository-consolidation/reference/qrv-status/services.json",
+        "sha256": "b0984e432c27155f1fd888d14d36d2f2ebb2514b446552a8ab72e8e34b248f74"
+      }
+    ],
+    "disposition": "Pinned monitor inventory. Historical statuses are configuration labels."
+  },
+  {
+    "repo": "ohi-stack/qrv-demo-records",
+    "commit": "454abd4df4453da81e7e984e8f3fcdc3acf24209",
+    "artifacts": [
+      {
+        "source": "README.md",
+        "destination": "docs/repository-consolidation/reference/qrv-demo-records/README.md",
+        "sha256": "8d3cb55e9731d14fe78b12c7158c9a8df7f28fb4f550c3c9ad8612e26917971f"
+      }
+    ],
+    "disposition": "Seed-policy reference only. Demo payloads are excluded from production storage."
+  }
+]

@@ -1,0 +1,34 @@
+{
+  "network": "QR-V Global Verification Network",
+  "architecture": "two-node-consolidated",
+  "updated": "2026-09-05T16:03:00Z",
+  "canonicalStatusUrl": "https://qrv.network/status",
+  "services": [
+    {
+      "name": "QR-V Platform",
+      "url": "https://qrv.network",
+      "repo": "qrv-node",
+      "status": "monitoring",
+      "health": "/healthz",
+      "readiness": "/readyz"
+    },
+    {
+      "name": "QR-V API + Registry",
+      "url": "https://api.qrv.network",
+      "repo": "qrv-api",
+      "status": "monitoring",
+      "health": "/healthz",
+      "readiness": "/readyz"
+    }
+  ],
+  "legacyAliases": [
+    "verify.qrv.network",
+    "issuer.qrv.network",
+    "registry.qrv.network",
+    "explorer.qrv.network",
+    "docs.qrv.network",
+    "developers.qrv.network",
+    "status.qrv.network",
+    "store.qrv.network"
+  ]
+}
